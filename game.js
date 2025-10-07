@@ -1,9 +1,9 @@
-/* PvP (offline) — iPhone + Food + Proper Tick Specials + Random Loadouts + Loot (SAFE KO)
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot (Extra-Safe KO)
    - Loadouts locked during duel (reroll disabled mid-fight)
    - Tick-true specials (arm -> fire on next attack tick), with cooldowns
    - Random Main (autos) + Spec (special move)
    - Auto-eat at <= 50 HP, 10 food, +20 heal, costs 1 tick
-   - SAFE KO: idempotent finish + deferred loot popup to avoid crash
+   - SAFE KO: single end-of-duel path, lethal hits skip eat, loot deferred
 */
 
 const W=420, H=640;
@@ -16,6 +16,9 @@ const config={
   scene:{ preload, create }
 };
 new Phaser.Game(config);
+
+// ---- toggles ----
+const SHOW_LOOT = true;       // set to false to disable the loot overlay entirely
 
 // ---- Core timing ----
 const TICK_MS = 600;
@@ -105,7 +108,7 @@ function create(){
   ui.rematchBtn= button(W/2+60, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
 
-  buildLootPanel();
+  buildLootPanel();   // harmless if SHOW_LOOT=false; it just stays hidden
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
@@ -211,7 +214,7 @@ function onTick(){
   tickCount++;
 
   const p=s.player, e=s.enemy;
-  if(!p.alive || !e.alive){ safeEnd(p.alive?p:e.alive?e:null, p.alive?e:p); return; }
+  if(!p.alive || !e.alive){ safeEnd(p.alive?p:e, p.alive?e:p); return; }
 
   regenSpec(p); regenSpec(e);
   if(p.specCooldown>0) p.specCooldown--;
@@ -234,6 +237,7 @@ function onTick(){
   }
 }
 
+/* ---------------- End / KO ---------------- */
 function stopDuel(){
   if(!duelActive) return;
   duelActive=false;
@@ -245,17 +249,17 @@ function safeEnd(winner, loser){
   if(duelEnded) return;
   duelEnded=true;
   duelActive=false;
-  if(tickEvent){ try{ tickEvent.remove(false); }catch{} tickEvent=null; }
 
+  if(tickEvent){ try{ tickEvent.remove(false); }catch{} tickEvent=null; }
   const winnerName = winner?.name || 'Winner';
   ui.status.setText(`${winnerName} wins!`);
   ui.rematchBtn.setVisible(true);
 
-  // Show loot for player wins, AFTER the frame (prevents crash)
-  if(winner===s.player){
+  if(SHOW_LOOT && winner===s.player){
     const mainId = s.enemy.mainWeapon?.id;
     const specId = s.enemy.specWeapon?.id;
-    s.time.delayedCall(0, ()=>loot_show(mainId, specId));
+    // defer slightly to avoid Safari’s “UI update during timer callback” hiccup
+    s.time.delayedCall(40, ()=>loot_show(mainId, specId));
   }
 }
 
@@ -321,10 +325,14 @@ function performSpecial(a, d){
 /* ---------------- Autos / Damage ---------------- */
 function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   if(duelEnded || !attacker.alive || !defender.alive) return;
+
   const max = Math.round(attacker.mainWeapon.maxHit * dmgMult);
   const hitChance = Math.min(0.98, Math.max(0, BASE_ACCURACY + accBonus));
   const hit = Math.random() < hitChance;
   const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
+
+  // Compute lethal before applying side-effects; lethal hits skip eat and end immediately
+  const lethal = dmg >= defender.hp;
 
   swingFx(attacker, defender, dmg);
 
@@ -332,14 +340,14 @@ function doSwing(attacker, defender, accBonus=0, dmgMult=1){
     defender.hp = Math.max(0, defender.hp - dmg);
     updateHpUI(defender);
 
-    if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
-
-    if(defender.hp<=0){
+    if(lethal){
       defender.alive=false;
       deathFx(defender);
       safeEnd(attacker, defender);
       return;
     }
+
+    if(defender.hp<=EAT_AT_HP) tryAutoEat(defender);
   }else{
     if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
   }
@@ -372,6 +380,7 @@ function regenSpec(f){
 /* ---------------- Loot Panel ---------------- */
 let lootUI = null;
 function buildLootPanel(){
+  if(!SHOW_LOOT){ lootUI=null; return; }
   const cx=W/2, cy=H*0.34;
   const cont = s.add.container(cx, cy);
   cont.setDepth(10);
@@ -422,7 +431,7 @@ function buildLootPanel(){
   }
 }
 function loot_show(mainId, specId){
-  if(!lootUI) return;
+  if(!SHOW_LOOT || !lootUI) return;
   lootUI.currentMainId = mainId || null;
   lootUI.currentSpecId = specId || null;
   lootUI.equipMain=false; lootUI.equipSpec=false;
@@ -437,7 +446,7 @@ function loot_show(mainId, specId){
   lootUI.cont.setVisible(true);
 }
 function loot_hide(){
-  if(!lootUI) return;
+  if(!SHOW_LOOT || !lootUI) return;
   lootUI.cont.setVisible(false);
   if(lootUI.equipMain) nextEquipOverride.mainId = lootUI.currentMainId;
   if(lootUI.equipSpec) nextEquipOverride.specId = lootUI.currentSpecId;
@@ -461,13 +470,6 @@ function swingFx(a, d, dmg){
 
   const txt = s.add.text(d.x, d.y-30, dmg>0?`-${dmg}`:'0', {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
   s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
-}
-function eatFx(f, healed){
-  if(duelEnded) return;
-  const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
-  s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
-  const t=s.add.text(f.x, f.y-64, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
-  s.tweens.add({targets:t, y:f.y-80, alpha:0, duration:700, onComplete:()=>t.destroy()});
 }
 
 /* ---------------- UI updates ---------------- */
