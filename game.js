@@ -1,16 +1,21 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot
-   KO-SAFE: queued finish, no tweens at KO, idempotent end.
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory
+   - KO-SAFE: lethal hits queue a finish; end handled on next tick; no KO tween by default
+   - Specials: arm → fire on NEXT tick (never same-tick), explicit post-spec recovery
+   - Loot modal with working buttons, localStorage save
+   - Tap “Loot: Mains | Specs” to open Inventory modal; lock equip for next round
 */
 
 const W=420, H=640;
-const config={ type:Phaser.CANVAS, width:W, height:H, backgroundColor:'#1b2333',
+const config={
+  type:Phaser.CANVAS, width:W, height:H, backgroundColor:'#1b2333',
   parent:'game', scale:{mode:Phaser.Scale.FIT, autoCenter:Phaser.Scale.CENTER_BOTH},
-  scene:{ preload, create } };
+  scene:{ preload, create }
+};
 new Phaser.Game(config);
 
 // ---- toggles ----
-const SHOW_LOOT = true;     // show loot popup after win
-const KO_ANIM   = false;    // play a death tween or not (off for Safari stability)
+const SHOW_LOOT = true;  // set false to disable loot popup entirely
+const KO_ANIM   = false; // death tween off for Safari stability
 
 // ---- timing & balance ----
 const TICK_MS=600, BASE_ACCURACY=0.80;
@@ -19,35 +24,50 @@ const SPEC_MAX=100, SPEC_REGEN_PER_TICK=2;
 
 // ---- mains & specs ----
 const MAIN_WEAPONS=[
+  // Melee
   {id:'dscim', name:'Dragon Scimitar', speedTicks:5, maxHit:48},
   {id:'whip',  name:'Abyssal Whip',    speedTicks:4, maxHit:42},
+  // Ranged
   {id:'msb',   name:'Magic Shortbow',  speedTicks:5, maxHit:40},
   {id:'dkn',   name:'Dragon Knives',   speedTicks:3, maxHit:25},
+  // Magic
   {id:'fsurge',name:'Fire Surge',      speedTicks:5, maxHit:48},
   {id:'iblitz',name:'Ice Blitz',       speedTicks:5, maxHit:44},
 ];
 const SPEC_WEAPONS=[
-  {id:'dds',    name:'Dragon Dagger',  cost:25, type:'dds'},
-  {id:'dclaws', name:'Dragon Claws',   cost:50, type:'claws'},
-  {id:'ags',    name:'Armadyl GS',     cost:50, type:'ags'},
-  {id:'dbow',   name:'Dark Bow',       cost:50, type:'dbow'},
-  {id:'vstaff', name:'Volatile Staff', cost:55, type:'vstaff'},
+  // Melee
+  {id:'dds',    name:'Dragon Dagger',  cost:25, type:'dds'},    // double
+  {id:'dclaws', name:'Dragon Claws',   cost:50, type:'claws'},  // 4-hit
+  {id:'ags',    name:'Armadyl GS',     cost:50, type:'ags'},    // big slam
+  // Ranged
+  {id:'dbow',   name:'Dark Bow',       cost:50, type:'dbow'},   // double arrow
+  // Magic
+  {id:'vstaff', name:'Volatile Staff', cost:55, type:'vstaff'}, // nuke
 ];
 const MAIN_MAP=Object.fromEntries(MAIN_WEAPONS.map(w=>[w.id,w]));
 const SPEC_MAP=Object.fromEntries(SPEC_WEAPONS.map(w=>[w.id,w]));
 
+// ---- runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false, pendingKO=null;
 
-// ---- loot (localStorage) ----
-let inventory = loadInventory();               // { mains:[], specs:[] }
+// ---- loot save ----
+let inventory = loadInventory();  // { mains:[], specs:[] }
 let nextEquipOverride = { mainId:null, specId:null };
-function loadInventory(){ try{const raw=localStorage.getItem('pvp_inventory'); if(raw){const o=JSON.parse(raw); return {mains:o.mains||[], specs:o.specs||[]};}}catch{} return {mains:[],specs:[]};}
-function saveInventory(){ try{localStorage.setItem('pvp_inventory',JSON.stringify(inventory));}catch{} }
+function loadInventory(){
+  try{ const raw=localStorage.getItem('pvp_inventory');
+       if(raw){ const o=JSON.parse(raw); return {mains:o.mains||[], specs:o.specs||[]}; } }
+  catch(e){}
+  return { mains:[], specs:[] };
+}
+function saveInventory(){
+  try{ localStorage.setItem('pvp_inventory', JSON.stringify(inventory)); }catch(e){}
+}
 
 function preload(){}
 
 function create(){
   s=this;
+
   s.add.text(W/2,22,'RuneScape-Style PvP (Offline)',{font:'18px Arial',color:'#fff'}).setOrigin(0.5);
   s.add.rectangle(W/2,H*0.52,W*0.72,2,0x2a3a55);
 
@@ -64,60 +84,91 @@ function create(){
 
   ui.status=s.add.text(W/2,H-162,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5);
   ui.invTxt=s.add.text(W/2,H-144,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5);
+  ui.invTxt.setInteractive({useHandCursor:true});
+  ui.invTxt.on('pointerdown', ()=>{ if(!duelActive) inv_show(); });
 
   ui.rerollBtn=button(W/2-100,H-110,132,36,'Reroll Loadouts',()=>{
-    if(duelActive) return; rollBothLoadouts(); refreshLoadoutTexts(); ui.status.setText('Loadouts rolled. Ready!');
+    if(duelActive) return;
+    rollBothLoadouts(); refreshLoadoutTexts();
+    ui.status.setText('Loadouts rolled. Ready!');
   });
-  ui.specBtn=smallButton(W/2+110,H-110,108,36,'SPEC',togglePlayerSpec);
-  ui.startBtn=button(W/2+60,H-74,170,44,'Start Duel',()=>startDuel());
-  ui.rematchBtn=button(W/2+60,H-74,170,44,'Rematch',()=>rematch()); ui.rematchBtn.setVisible(false);
+  ui.specBtn   = smallButton(W/2+110,H-110,108,36,'SPEC',togglePlayerSpec);
+  ui.startBtn  = button(W/2+60,H-74,170,44,'Start Duel',()=>startDuel());
+  ui.rematchBtn= button(W/2+60,H-74,170,44,'Rematch',()=>rematch());
+  ui.rematchBtn.setVisible(false);
 
   buildLootPanel();
+  buildInventoryPanel();
+
   rollBothLoadouts(); refreshLoadoutTexts();
 }
 
-/* ---------- fighter ---------- */
+/* ================= Fighter & UI helpers ================= */
+
 function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
     food:FOOD_START,lastEatTick:-999,spec:SPEC_MAX,
     mainWeapon:null,specWeapon:null,nextAttack:0,
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999};
   f.body=s.add.circle(f.x,f.y,18,o.color).setStrokeStyle(3,o.outline);
+
   const barW=110;
   f.hpBg=s.add.rectangle(f.x,f.y-44,barW,10,0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
   f.hpFill=s.add.rectangle(f.x-barW/2,f.y-44,barW,8,0x4dd06d).setOrigin(0,0.5);
   f.hpText=s.add.text(f.x,f.y-44,'',{font:'11px Arial',color:'#fff'}).setOrigin(0.5);
+
   f.foodBg=s.add.rectangle(f.x,f.y-26,56,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
   f.foodTxt=s.add.text(f.x,f.y-26,`Food: ${f.food}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5);
+
   f.specBg=s.add.rectangle(f.x,f.y-14,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
   f.specFill=s.add.rectangle(f.x-55,f.y-14,110,4,0x6fd1ff).setOrigin(0,0.5);
   f.specTxt=s.add.text(f.x,f.y+2,`Spec ${f.spec}%`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5);
+
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
   return f;
 }
 
-/* ---------- UI helpers ---------- */
 function button(x,y,w,h,label,onClick){
   const bg=s.add.rectangle(x,y,w,h,0x2a2f45).setStrokeStyle(2,0x151826).setOrigin(0.5).setInteractive({useHandCursor:true});
   const txt=s.add.text(x,y,label,{font:'16px Arial',color:'#fff'}).setOrigin(0.5);
-  bg.on('pointerdown',()=>{bg.setScale(0.98); onClick&&onClick();});
-  bg.on('pointerup',()=>bg.setScale(1)); bg.on('pointerout',()=>bg.setScale(1));
-  bg.setLabel=t=>txt.setText(t); return bg;
+  bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
+  bg.on('pointerup',()=>bg.setScale(1));
+  bg.on('pointerout',()=>bg.setScale(1));
+  bg.setLabel=t=>txt.setText(t);
+  return bg;
 }
+
 function smallButton(x,y,w,h,label,onClick){
   const bg=s.add.rectangle(x,y,w,h,0x23324a).setStrokeStyle(2,0x152033).setOrigin(0.5).setInteractive({useHandCursor:true});
   const txt=s.add.text(x,y,label,{font:'13px Arial',color:'#d6e8ff'}).setOrigin(0.5);
-  bg.on('pointerdown',()=>{bg.setScale(0.98); onClick&&onClick();});
-  bg.on('pointerup',()=>bg.setScale(1)); bg.on('pointerout',()=>bg.setScale(1));
+  bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
+  bg.on('pointerup',()=>bg.setScale(1));
+  bg.on('pointerout',()=>bg.setScale(1));
   bg.setActiveState=armed=>{ bg.setStrokeStyle(2,armed?0x6fd1ff:0x152033); txt.setColor(armed?'#fff':'#d6e8ff'); };
-  bg._txt=txt; return bg;
+  bg._txt=txt;
+  return bg;
 }
 
-/* ---------- loadouts ---------- */
+// Button that lives *inside a container* (used by popups)
+function panelButton(parent, x, y, w, h, label, onClick){
+  const bg = s.add.rectangle(x, y, w, h, 0x2a2f45).setStrokeStyle(2, 0x151826).setOrigin(0.5);
+  const txt = s.add.text(x, y, label, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
+  bg.setInteractive({useHandCursor:true});
+  bg.on('pointerdown', ()=>{ bg.setScale(0.98); onClick && onClick(); });
+  bg.on('pointerup',   ()=>bg.setScale(1));
+  bg.on('pointerout',  ()=>bg.setScale(1));
+  parent.add(bg); parent.add(txt);
+  return { bg, txt, setLabel:(t)=>txt.setText(t) };
+}
+
+/* ================= Loadouts ================= */
+
 const pickRandom=a=>a[(Math.random()*a.length)|0];
 function rollLoadout(f){
-  f.mainWeapon = (f===s.player && nextEquipOverride.mainId && MAIN_MAP[nextEquipOverride.mainId]) ? MAIN_MAP[nextEquipOverride.mainId] : pickRandom(MAIN_WEAPONS);
-  f.specWeapon = (f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId]) ? SPEC_MAP[nextEquipOverride.specId] : pickRandom(SPEC_WEAPONS);
+  f.mainWeapon = (f===s.player && nextEquipOverride.mainId && MAIN_MAP[nextEquipOverride.mainId])
+    ? MAIN_MAP[nextEquipOverride.mainId] : pickRandom(MAIN_WEAPONS);
+  f.specWeapon = (f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId])
+    ? SPEC_MAP[nextEquipOverride.specId] : pickRandom(SPEC_WEAPONS);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function clearNextOverrides(){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
@@ -130,15 +181,19 @@ function refreshLoadoutTexts(){
 }
 function invLabel(){ return `Loot: Mains ${inventory.mains.length} | Specs ${inventory.specs.length}`; }
 
-/* ---------- combat control ---------- */
+/* ================= Combat control ================= */
+
 function startDuel(){
   if(duelActive) return;
   duelActive=true; duelEnded=false; pendingKO=null;
   ui.status.setText('Fight!'); ui.startBtn.setVisible(false); ui.rematchBtn.setVisible(false);
+
   s.player.nextAttack=s.player.mainWeapon.speedTicks;
   s.enemy.nextAttack =s.enemy.mainWeapon.speedTicks;
+
   s.player.wantSpec=false; s.player.armedSpecTick=-1;
   s.enemy.wantSpec =false; s.enemy.armedSpecTick =-1;
+
   if(tickEvent) tickEvent.remove(false);
   tickEvent=s.time.addEvent({delay:TICK_MS,loop:true,callback:onTick});
 }
@@ -148,8 +203,9 @@ function onTick(){
   tickCount++;
 
   const p=s.player,e=s.enemy;
-  if(!p.alive || !e.alive || pendingKO){ // if KO queued, just finish
-    if(pendingKO) finalizeKO(); else safeEnd(p.alive?p:e, p.alive?e:p);
+  if(!p.alive || !e.alive || pendingKO){
+    if(pendingKO) finalizeKO();
+    else safeEnd(p.alive?p:e, p.alive?e:p);
     return;
   }
 
@@ -165,7 +221,7 @@ function onTick(){
   }
 
   if(e.nextAttack<=0 && e.alive && !pendingKO){
-    if(!e.wantSpec && canSpec(e)){ const want=(p.hp<=45)?0.7:0.25; if(Math.random()<want){e.wantSpec=true; e.armedSpecTick=tickCount;} }
+    if(!e.wantSpec && canSpec(e)){ const want=(p.hp<=45)?0.7:0.25; if(Math.random()<want){ e.wantSpec=true; e.armedSpecTick=tickCount; } }
     const fired=tryFireSpecialOnTick(e,p);
     if(!fired && !pendingKO){ doSwing(e,p); if(!pendingKO) e.nextAttack=e.mainWeapon.speedTicks; }
   }
@@ -176,7 +232,7 @@ function onTick(){
 function finalizeKO(){
   if(!pendingKO) return;
   const {winner,loser}=pendingKO; pendingKO=null;
-  safeEnd(winner, loser);
+  safeEnd(winner,loser);
 }
 
 function stopDuel(){
@@ -187,18 +243,21 @@ function stopDuel(){
 }
 
 function safeEnd(winner, loser){
-  if(duelEnded) return; duelEnded=true; duelActive=false;
+  if(duelEnded) return;
+  duelEnded=true; duelActive=false;
   if(tickEvent){ try{tickEvent.remove(false);}catch{} tickEvent=null; }
+
   ui.status.setText(`${(winner?.name)||'Winner'} wins!`);
   ui.rematchBtn.setVisible(true);
 
   if(SHOW_LOOT && winner===s.player){
     const mainId=s.enemy.mainWeapon?.id, specId=s.enemy.specWeapon?.id;
-    s.time.delayedCall(40, ()=>loot_show(mainId,specId));
+    s.time.delayedCall(40, ()=>loot_show(mainId, specId));
   }
 }
 
-/* ---------- rematch ---------- */
+/* ================= Rematch ================= */
+
 function rematch(){
   resetFighter(s.player); resetFighter(s.enemy);
   rollBothLoadouts(); refreshLoadoutTexts();
@@ -208,15 +267,18 @@ function rematch(){
   ui.specBtn.setActiveState(false);
 }
 function resetFighter(f){
-  f.hp=f.maxHp; f.alive=true; f.food=FOOD_START; f.lastEatTick=-999;
+  f.hp=f.maxHp; f.alive=true;
+  f.food=FOOD_START; f.lastEatTick=-999;
   f.spec=SPEC_MAX; f.wantSpec=false; f.armedSpecTick=-1; f.specCooldown=0; f.lastSpecTick=-999;
   f.nextAttack=0; f.body.setAlpha(1).setScale(1);
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
 }
 
-/* ---------- specials (arm -> next tick) ---------- */
+/* ================= Specials (arm → next tick) ================= */
+
 function togglePlayerSpec(){
-  const p=s.player; if(!duelActive||!p.alive||duelEnded||pendingKO) return;
+  const p=s.player;
+  if(!duelActive || !p.alive || duelEnded || pendingKO) return;
   if(p.wantSpec){ p.wantSpec=false; p.armedSpecTick=-1; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
   if(!canSpec(p)){ ui.status.setText('Not ready (energy/cooldown)'); return; }
   p.wantSpec=true; p.armedSpecTick=tickCount; ui.specBtn.setActiveState(true);
@@ -226,16 +288,19 @@ function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
 function tryFireSpecialOnTick(a,d){
   if(duelEnded||pendingKO) return false;
   if(!a.wantSpec) return false;
-  if(a.armedSpecTick===-1 || tickCount<=a.armedSpecTick) return false;
+  if(a.armedSpecTick===-1 || tickCount<=a.armedSpecTick) return false; // must wait 1 full tick
   if(!canSpec(a)) return false;
+
   performSpecial(a,d);
-  a.wantSpec=false; a.armedSpecTick=-1; if(a===s.player) ui.specBtn.setActiveState(false);
+  a.wantSpec=false; a.armedSpecTick=-1;
+  if(a===s.player) ui.specBtn.setActiveState(false);
   return true;
 }
 function performSpecial(a,d){
   if(duelEnded||pendingKO||!a.alive||!d.alive) return;
-  const spec=a.specWeapon.type, cost=a.specWeapon.cost; if(a.spec<cost) return;
-  a.spec-=cost; updateSpecUI(a);
+  const spec=a.specWeapon.type, cost=a.specWeapon.cost;
+  if(a.spec<cost) return;
+  a.spec -= cost; updateSpecUI(a);
 
   if(spec==='dds'){
     doSwing(a,d,0.15,1.15); if(pendingKO) return;
@@ -259,7 +324,8 @@ function performSpecial(a,d){
   a.lastSpecTick=tickCount;
 }
 
-/* ---------- damage ---------- */
+/* ================= Damage / Eating / Regen ================= */
+
 function doSwing(attacker,defender,accBonus=0,dmgMult=1){
   if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
 
@@ -288,58 +354,152 @@ function doSwing(attacker,defender,accBonus=0,dmgMult=1){
   }
 }
 
-/* ---------- eat / regen ---------- */
 function tryAutoEat(f){
   if(duelEnded||pendingKO) return;
   if(f.food<=0) return;
   if(f.lastEatTick===tickCount) return;
   f.food--; f.lastEatTick=tickCount;
+
   const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+FOOD_HEAL); const healed=f.hp-before;
-  f.nextAttack = f.nextAttack + EAT_COST_TK;
+  f.nextAttack = f.nextAttack + EAT_COST_TK; // minor delay
+
   updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
   if(!duelEnded) ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
 }
 function regenSpec(f){ if(!f.alive||duelEnded||pendingKO) return; f.spec=Math.min(SPEC_MAX,f.spec+SPEC_REGEN_PER_TICK); updateSpecUI(f); }
 
-/* ---------- loot panel ---------- */
+/* ================= Loot modal (inside container buttons) ================= */
+
 let lootUI=null;
 function buildLootPanel(){
   if(!SHOW_LOOT){ lootUI=null; return; }
-  const cx=W/2,cy=H*0.34,cont=s.add.container(cx,cy).setDepth(10);
-  const bg=s.add.rectangle(0,0,W*0.84,170,0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title=s.add.text(0,-68,'Loot Found',{font:'16px Arial',color:'#fff'}).setOrigin(0.5);
-  const mainTxt=s.add.text(-150,-36,'Main: —',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
-  const specTxt=s.add.text(-150,-12,'Spec: —',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
-  const takeMainBtn=button(-60,32,110,30,'Take Main',()=>loot_takeMain());
-  const takeSpecBtn=button(60,32,110,30,'Take Spec',()=>loot_takeSpec());
-  const equipNextMain=s.add.text(-150,56,'☐ Equip main next round',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
-  const equipNextSpec=s.add.text(-150,76,'☐ Equip spec next round',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
-  const closeBtn=button(140,70,80,28,'Close',()=>loot_hide());
-  cont.add([bg,title,mainTxt,specTxt,takeMainBtn,takeSpecBtn,equipNextMain,equipNextSpec,closeBtn]); cont.setVisible(false);
-  lootUI={cont,mainTxt,specTxt,equipNextMain,equipNextSpec,currentMainId:null,currentSpecId:null,equipMain:false,equipSpec:false};
-  equipNextMain.on('pointerdown',()=>{lootUI.equipMain=!lootUI.equipMain; equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round');});
-  equipNextSpec.on('pointerdown',()=>{lootUI.equipSpec=!lootUI.equipSpec; equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round');});
-  function loot_takeMain(){ if(!lootUI.currentMainId) return; if(!inventory.mains.includes(lootUI.currentMainId)){inventory.mains.push(lootUI.currentMainId); saveInventory(); ui.invTxt.setText(invLabel());}}
-  function loot_takeSpec(){ if(!lootUI.currentSpecId) return; if(!inventory.specs.includes(lootUI.currentSpecId)){inventory.specs.push(lootUI.currentSpecId); saveInventory(); ui.invTxt.setText(invLabel());}}
+
+  const cx=W/2, cy=H*0.34;
+  const cont = s.add.container(cx, cy).setDepth(10);
+  const bg   = s.add.rectangle(0,0, W*0.86, 190, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= s.add.text(0,-72,'Loot Found',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5);
+
+  const mainTxt = s.add.text(-160, -38, 'Main: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5);
+  const specTxt = s.add.text(-160, -14, 'Spec: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5);
+
+  cont.add([bg,title,mainTxt,specTxt]);
+
+  panelButton(cont, -60, 30, 120, 32, 'Take Main', ()=>loot_takeMain());
+  panelButton(cont,  60, 30, 120, 32, 'Take Spec', ()=>loot_takeSpec());
+  panelButton(cont, 150, 70,  86, 28, 'Close', ()=>loot_hide());
+
+  const equipNextMain = s.add.text(-160, 58, '☐ Equip main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  const equipNextSpec = s.add.text(-160, 78, '☐ Equip spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  cont.add([equipNextMain, equipNextSpec]);
+
+  cont.setVisible(false);
+
+  lootUI = {
+    cont, mainTxt, specTxt, equipNextMain, equipNextSpec,
+    currentMainId:null, currentSpecId:null, equipMain:false, equipSpec:false
+  };
+
+  equipNextMain.on('pointerdown', ()=>{
+    lootUI.equipMain=!lootUI.equipMain;
+    equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round');
+  });
+  equipNextSpec.on('pointerdown', ()=>{
+    lootUI.equipSpec=!lootUI.equipSpec;
+    equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round');
+  });
+
+  function loot_takeMain(){
+    if(!lootUI.currentMainId) return;
+    if(!inventory.mains.includes(lootUI.currentMainId)){
+      inventory.mains.push(lootUI.currentMainId); saveInventory(); ui.invTxt.setText(invLabel());
+    }
+  }
+  function loot_takeSpec(){
+    if(!lootUI.currentSpecId) return;
+    if(!inventory.specs.includes(lootUI.currentSpecId)){
+      inventory.specs.push(lootUI.currentSpecId); saveInventory(); ui.invTxt.setText(invLabel());
+    }
+  }
 }
-function loot_show(mainId,specId){
-  if(!SHOW_LOOT||!lootUI) return;
-  lootUI.currentMainId=mainId||null; lootUI.currentSpecId=specId||null;
+function loot_show(mainId, specId){
+  if(!SHOW_LOOT || !lootUI) return;
+  lootUI.currentMainId = mainId || null;
+  lootUI.currentSpecId = specId || null;
   lootUI.equipMain=false; lootUI.equipSpec=false;
   lootUI.equipNextMain.setText('☐ Equip main next round');
   lootUI.equipNextSpec.setText('☐ Equip spec next round');
-  lootUI.mainTxt.setText(`Main: ${MAIN_MAP[mainId]?.name||'—'}`);
-  lootUI.specTxt.setText(`Spec: ${SPEC_MAP[specId]?.name||'—'}`);
+  lootUI.mainTxt.setText(`Main: ${MAIN_MAP[mainId]?.name || '—'}`);
+  lootUI.specTxt.setText(`Spec: ${SPEC_MAP[specId]?.name || '—'}`);
   lootUI.cont.setVisible(true);
 }
 function loot_hide(){
-  if(!SHOW_LOOT||!lootUI) return;
+  if(!SHOW_LOOT || !lootUI) return;
   lootUI.cont.setVisible(false);
-  if(lootUI.equipMain) nextEquipOverride.mainId=lootUI.currentMainId;
-  if(lootUI.equipSpec) nextEquipOverride.specId=lootUI.currentSpecId;
+  if(lootUI.equipMain) nextEquipOverride.mainId = lootUI.currentMainId;
+  if(lootUI.equipSpec) nextEquipOverride.specId = lootUI.currentSpecId;
 }
 
-/* ---------- FX ---------- */
+/* ================= Inventory modal (tap “Loot: …”) ================= */
+
+let invUI=null, invCur={main:0, spec:0};
+function buildInventoryPanel(){
+  const cx=W/2, cy=H*0.36;
+  const cont = s.add.container(cx, cy).setDepth(10);
+  const bg   = s.add.rectangle(0,0, W*0.86, 210, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= s.add.text(0,-82,'Inventory',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5);
+
+  const mainLbl = s.add.text(-160,-46,'Mains:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
+  const specLbl = s.add.text(-160, -6,'Specs:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
+
+  const mainVal = s.add.text(-26,-46,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5);
+  const specVal = s.add.text(-26, -6,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5);
+
+  cont.add([bg,title,mainLbl,specLbl,mainVal,specVal]);
+
+  panelButton(cont, -90, -46, 44, 26, '◀', ()=>{ invCur.main=(invCur.main-1+Math.max(1,inventory.mains.length))%Math.max(1,inventory.mains.length); inv_refreshVals(); });
+  panelButton(cont,  90, -46, 44, 26, '▶', ()=>{ invCur.main=(invCur.main+1)%Math.max(1,inventory.mains.length); inv_refreshVals(); });
+  panelButton(cont, -90,  -6, 44, 26, '◀', ()=>{ invCur.spec=(invCur.spec-1+Math.max(1,inventory.specs.length))%Math.max(1,inventory.specs.length); inv_refreshVals(); });
+  panelButton(cont,  90,  -6, 44, 26, '▶', ()=>{ invCur.spec=(invCur.spec+1)%Math.max(1,inventory.specs.length); inv_refreshVals(); });
+
+  const lockMain = s.add.text(-160, 36, '☐ Equip selected main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  const lockSpec = s.add.text(-160, 56, '☐ Equip selected spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  cont.add([lockMain, lockSpec]);
+
+  let lockM=false, lockS=false;
+  lockMain.on('pointerdown', ()=>{ lockM=!lockM; lockMain.setText((lockM?'☑':'☐')+' Equip selected main next round'); });
+  lockSpec.on('pointerdown', ()=>{ lockS=!lockS; lockSpec.setText((lockS?'☑':'☐')+' Equip selected spec next round'); });
+
+  panelButton(cont, 150, 82, 86, 28, 'Close', ()=>{
+    const mainId = inventory.mains[invCur.main];
+    const specId = inventory.specs[invCur.spec];
+    if(lockM && mainId) nextEquipOverride.mainId = mainId;
+    if(lockS && specId) nextEquipOverride.specId = specId;
+    cont.setVisible(false);
+  });
+
+  cont.setVisible(false);
+
+  invUI = { cont, mainVal, specVal };
+
+  function inv_refreshVals(){
+    invUI.mainVal.setText(MAIN_MAP[inventory.mains[invCur.main]]?.name || '—');
+    invUI.specVal.setText(SPEC_MAP[inventory.specs[invCur.spec]]?.name || '—');
+  }
+  inv_refreshVals();
+}
+
+function inv_show(){
+  if(!invUI) return;
+  invCur.main = Math.min(invCur.main, Math.max(0, inventory.mains.length-1));
+  invCur.spec = Math.min(invCur.spec, Math.max(0, inventory.specs.length-1));
+  // refresh text
+  invUI.mainVal.setText(MAIN_MAP[inventory.mains[invCur.main]]?.name || '—');
+  invUI.specVal.setText(SPEC_MAP[inventory.specs[invCur.spec]]?.name || '—');
+  invUI.cont.setVisible(true);
+}
+
+/* ================= FX & UI updates ================= */
+
 function swingFx(a,d,dmg){
   if(duelEnded||pendingKO) return;
   const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y);
@@ -363,7 +523,20 @@ function eatFx(f,healed){
 }
 function deathFx(f){ s.tweens.add({targets:f.body,scale:1.35,alpha:0,duration:320}); }
 
-/* ---------- UI updates ---------- */
-function updateHpUI(f){ const barW=110,r=Math.max(0,f.hp/f.maxHp); f.hpFill.width=barW*r; f.hpFill.fillColor=r>0.5?0x4dd06d:(r>0.2?0xf1c14e:0xe86a6a); f.hpText.setText(`${f.hp}/${f.maxHp}`); }
-function updateFoodUI(f){ f.foodTxt.setText(`Food: ${f.food}`); f.foodTxt.setColor(f.food>0?'#cfe8ff':'#ffaaaa'); f.foodBg.fillColor=f.food>0?0x1f2a3a:0x3a2222; }
-function updateSpecUI(f){ const w=110,r=Math.max(0,Math.min(1,f.spec/SPEC_MAX)); f.specFill.width=w*r; f.specFill.fillColor=r>0.5?0x6fd1ff:(r>0.25?0xf1c14e:0xe86a6a); f.specTxt.setText(`Spec ${Math.round(f.spec)}%`); }
+function updateHpUI(f){
+  const barW=110,r=Math.max(0,f.hp/f.maxHp);
+  f.hpFill.width=barW*r;
+  f.hpFill.fillColor=r>0.5?0x4dd06d:(r>0.2?0xf1c14e:0xe86a6a);
+  f.hpText.setText(`${f.hp}/${f.maxHp}`);
+}
+function updateFoodUI(f){
+  f.foodTxt.setText(`Food: ${f.food}`);
+  f.foodTxt.setColor(f.food>0?'#cfe8ff':'#ffaaaa');
+  f.foodBg.fillColor=f.food>0?0x1f2a3a:0x3a2222;
+}
+function updateSpecUI(f){
+  const w=110,r=Math.max(0,Math.min(1,f.spec/SPEC_MAX));
+  f.specFill.width=w*r;
+  f.specFill.fillColor=r>0.5?0x6fd1ff:(r>0.25?0xf1c14e:0xe86a6a);
+  f.specTxt.setText(`Spec ${Math.round(f.spec)}%`);
+}
