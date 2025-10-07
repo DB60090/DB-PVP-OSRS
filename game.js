@@ -4,7 +4,7 @@
    - Spec cooldown prevents spamming
    - Random Main weapon (autos) + Spec weapon (special move)
    - Auto-eat at <= 50 HP, 10 food, +20 heal, eating costs 1 tick
-*/
+*/ 
 
 const W=420, H=640;
 const config={
