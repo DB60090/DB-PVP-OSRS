@@ -1,8 +1,9 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory + Armour
    - KO-SAFE: lethal hits queue a finish; end handled on next tick; no KO tween by default
    - Specials: arm → fire on NEXT tick (never same-tick), explicit post-spec recovery
    - Loot modal with working buttons, localStorage save
    - Tap “Loot: Mains | Specs” to open Inventory modal; lock equip for next round
+   - NEW: Armour sets w/ offensive synergies + defensive counters, shown under loadout
 */
 
 const W=420, H=640;
@@ -25,14 +26,14 @@ const SPEC_MAX=100, SPEC_REGEN_PER_TICK=2;
 // ---- mains & specs ----
 const MAIN_WEAPONS=[
   // Melee
-  {id:'dscim', name:'Dragon Scimitar', speedTicks:5, maxHit:48},
-  {id:'whip',  name:'Abyssal Whip',    speedTicks:4, maxHit:42},
+  {id:'dscim', name:'Dragon Scimitar', speedTicks:5, maxHit:48, style:'melee'},
+  {id:'whip',  name:'Abyssal Whip',    speedTicks:4, maxHit:42, style:'melee'},
   // Ranged
-  {id:'msb',   name:'Magic Shortbow',  speedTicks:5, maxHit:40},
-  {id:'dkn',   name:'Dragon Knives',   speedTicks:3, maxHit:25},
+  {id:'msb',   name:'Magic Shortbow',  speedTicks:5, maxHit:40, style:'ranged'},
+  {id:'dkn',   name:'Dragon Knives',   speedTicks:3, maxHit:25, style:'ranged'},
   // Magic
-  {id:'fsurge',name:'Fire Surge',      speedTicks:5, maxHit:48},
-  {id:'iblitz',name:'Ice Blitz',       speedTicks:5, maxHit:44},
+  {id:'fsurge',name:'Fire Surge',      speedTicks:5, maxHit:48, style:'mage'},
+  {id:'iblitz',name:'Ice Blitz',       speedTicks:5, maxHit:44, style:'mage'},
 ];
 const SPEC_WEAPONS=[
   // Melee
@@ -46,6 +47,30 @@ const SPEC_WEAPONS=[
 ];
 const MAIN_MAP=Object.fromEntries(MAIN_WEAPONS.map(w=>[w.id,w]));
 const SPEC_MAP=Object.fromEntries(SPEC_WEAPONS.map(w=>[w.id,w]));
+
+/* ================= Armour =================
+   Each set has:
+   - affinity: style it boosts offensively ('melee'|'ranged'|'mage')
+   - off: accuracy & damage multipliers when USING its affinity style
+   - def: reduces incoming attacks per incoming style (applies to ATTACKER’s hit chance/max damage)
+*/
+const ARMOUR_SETS = [
+  // Melee lines
+  {id:'dragon_melee',  name:'Dragon',          affinity:'melee', off:{acc:+0.04, dmg:+0.06}, def:{melee:{acc:-0.03,dmg:-0.03}}},
+  {id:'barrows_melee', name:'Barrows',         affinity:'melee', off:{acc:+0.06, dmg:+0.08}, def:{melee:{acc:-0.05,dmg:-0.05}}},
+  {id:'nandos_melee',  name:"Nando's",         affinity:'melee', off:{acc:+0.02, dmg:+0.03}, def:{melee:{acc:-0.02,dmg:-0.02}}},
+  {id:'torva_melee',   name:'Torva',           affinity:'melee', off:{acc:+0.08, dmg:+0.12}, def:{melee:{acc:-0.06,dmg:-0.06}, ranged:{acc:-0.02,dmg:-0.01}}},
+  // Ranged lines
+  {id:'void_r',        name:'Void (Ranged)',   affinity:'ranged', off:{acc:+0.10, dmg:+0.10}, def:{ranged:{acc:-0.04,dmg:-0.04}}},
+  {id:'evoid_r',       name:'Elite Void (R)',  affinity:'ranged', off:{acc:+0.12, dmg:+0.12}, def:{ranged:{acc:-0.05,dmg:-0.05}}},
+  {id:'bdhide_r',      name:"Blessed d'hide",  affinity:'ranged', off:{acc:+0.07, dmg:+0.08}, def:{ranged:{acc:-0.05,dmg:-0.05}, mage:{acc:-0.01,dmg:0}}},
+  // Mage lines
+  {id:'zamorak_m',     name:'Zamorak Robes',   affinity:'mage',   off:{acc:+0.04, dmg:+0.06}, def:{mage:{acc:-0.04,dmg:-0.04}}},
+  {id:'void_m',        name:'Void (Mage)',     affinity:'mage',   off:{acc:+0.10, dmg:+0.10}, def:{mage:{acc:-0.04,dmg:-0.04}}},
+  {id:'evoid_m',       name:'Elite Void (M)',  affinity:'mage',   off:{acc:+0.12, dmg:+0.12}, def:{mage:{acc:-0.05,dmg:-0.05}}},
+  {id:'ancestral_m',   name:'Ancestral',       affinity:'mage',   off:{acc:+0.08, dmg:+0.12}, def:{mage:{acc:-0.05,dmg:-0.05}, ranged:{acc:-0.01,dmg:0}}},
+];
+const ARMOUR_MAP = Object.fromEntries(ARMOUR_SETS.map(a=>[a.id,a]));
 
 // ---- runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false, pendingKO=null;
@@ -82,6 +107,10 @@ function create(){
   p.loadoutTxt=s.add.text(p.x,p.y-60,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5);
   e.loadoutTxt=s.add.text(e.x,e.y-60,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5);
 
+  // NEW: armour line just below loadout
+  p.armourTxt=s.add.text(p.x,p.y-48,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5);
+  e.armourTxt=s.add.text(e.x,e.y-48,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5);
+
   ui.status=s.add.text(W/2,H-162,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5);
   ui.invTxt=s.add.text(W/2,H-144,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5);
   ui.invTxt.setInteractive({useHandCursor:true});
@@ -109,7 +138,9 @@ function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
     food:FOOD_START,lastEatTick:-999,spec:SPEC_MAX,
     mainWeapon:null,specWeapon:null,nextAttack:0,
-    wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999};
+    wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
+    armour:null // NEW: armour slot
+  };
   f.body=s.add.circle(f.x,f.y,18,o.color).setStrokeStyle(3,o.outline);
 
   const barW=110;
@@ -164,11 +195,22 @@ function panelButton(parent, x, y, w, h, label, onClick){
 /* ================= Loadouts ================= */
 
 const pickRandom=a=>a[(Math.random()*a.length)|0];
+const weaponStyle = w => w?.style || 'melee'; // safety default
+
+function rollArmourFor(f){
+  // Prefer armour that matches weapon style about 60% of the time
+  const st = weaponStyle(f.mainWeapon);
+  const poolMatch = ARMOUR_SETS.filter(a=>a.affinity===st);
+  const poolAny   = ARMOUR_SETS;
+  f.armour = (Math.random()<0.6 && poolMatch.length ? pickRandom(poolMatch) : pickRandom(poolAny));
+}
+
 function rollLoadout(f){
   f.mainWeapon = (f===s.player && nextEquipOverride.mainId && MAIN_MAP[nextEquipOverride.mainId])
     ? MAIN_MAP[nextEquipOverride.mainId] : pickRandom(MAIN_WEAPONS);
   f.specWeapon = (f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId])
     ? SPEC_MAP[nextEquipOverride.specId] : pickRandom(SPEC_WEAPONS);
+  rollArmourFor(f); // NEW
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function clearNextOverrides(){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
@@ -176,6 +218,8 @@ function refreshLoadoutTexts(){
   const p=s.player,e=s.enemy;
   p.loadoutTxt.setText(`Main: ${p.mainWeapon.name}  |  Spec: ${p.specWeapon.name}`);
   e.loadoutTxt.setText(`Main: ${e.mainWeapon.name}  |  Spec: ${e.specWeapon.name}`);
+  p.armourTxt.setText(`Arm: ${p.armour?.name||'—'} (${p.armour?.affinity||'—'})`);
+  e.armourTxt.setText(`Arm: ${e.armour?.name||'—'} (${e.armour?.affinity||'—'})`);
   ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
   ui.invTxt.setText(invLabel());
 }
@@ -326,11 +370,35 @@ function performSpecial(a,d){
 
 /* ================= Damage / Eating / Regen ================= */
 
+function offensiveBonus(attacker){
+  const a = attacker.armour, st = weaponStyle(attacker.mainWeapon);
+  if(!a) return {acc:+0, dmg:1};
+  if(a.affinity === st) return {acc: a.off.acc, dmg: 1 + a.off.dmg};
+  return {acc:+0, dmg:1};
+}
+function defensiveDebuff(defender, incomingStyle){
+  const a = defender.armour;
+  if(!a) return {acc:0, dmg:1};
+  const vs = (a.def && a.def[incomingStyle]) || null;
+  if(!vs) return {acc:0, dmg:1};
+  return {acc: vs.acc, dmg: 1 + vs.dmg}; // dmg is a multiplier (≤1 when reducing)
+}
+
 function doSwing(attacker,defender,accBonus=0,dmgMult=1){
   if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
 
-  const max=Math.round(attacker.mainWeapon.maxHit*dmgMult);
-  const hitChance=Math.min(0.98,Math.max(0,BASE_ACCURACY+accBonus));
+  const style = weaponStyle(attacker.mainWeapon);
+
+  // Armour effects
+  const off = offensiveBonus(attacker);                  // attacker’s offensive buff if armour matches weapon
+  const def = defensiveDebuff(defender, style);          // defender causes debuff to attacker based on incoming style
+
+  const baseHit = BASE_ACCURACY + accBonus + off.acc + def.acc; // def.acc usually negative
+  const hitChance = Math.min(0.98, Math.max(0.02, baseHit));    // clamp 2%..98%
+
+  const effDmgMult = Math.max(0, dmgMult * off.dmg * def.dmg);  // stack multipliers
+  const max=Math.round(attacker.mainWeapon.maxHit*effDmgMult);
+
   const hit=Math.random()<hitChance;
   const dmg=hit?Phaser.Math.Between(0,Math.max(0,max)):0;
 
