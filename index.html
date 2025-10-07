@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RuneScape-Style PvP (Offline)</title>
+  <style>
+    html,body{margin:0;padding:0;background:#111;color:#e6f2ff;font-family:Arial,Helvetica,sans-serif}
+    #game{display:flex;justify-content:center;align-items:center;height:100vh}
+    .hint{position:fixed;left:10px;bottom:10px;font-size:12px;opacity:.85}
+    a{color:#9fdcff}
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+  <div class="hint">
+    Controls: <b>1</b>=Sword, <b>2</b>=Dagger, <b>3</b>=Axe, <b>R</b>=Rematch
+  </div>
+
+  <!-- Phaser -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <!-- Game -->
+  <script src="./game.js"></script>
+</body>
+</html>
