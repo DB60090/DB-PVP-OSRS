@@ -1,9 +1,7 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot (Extra-Safe KO)
-   - Loadouts locked during duel (reroll disabled mid-fight)
-   - Tick-true specials (arm -> fire on next attack tick), with cooldowns
-   - Random Main (autos) + Spec (special move)
-   - Auto-eat at <= 50 HP, 10 food, +20 heal, costs 1 tick
-   - SAFE KO: single end-of-duel path, lethal hits skip eat, loot deferred
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot (Safe + Stable)
+   - Specials: arm → fire on NEXT tick (never same-tick)
+   - Explicit post-spec recovery (nextAttack set, not +=)
+   - Idempotent KO + deferred loot (mobile Safari friendly)
 */
 
 const W=420, H=640;
@@ -18,13 +16,13 @@ const config={
 new Phaser.Game(config);
 
 // ---- toggles ----
-const SHOW_LOOT = true;       // set to false to disable the loot overlay entirely
+const SHOW_LOOT = true;
 
 // ---- Core timing ----
 const TICK_MS = 600;
 const BASE_ACCURACY = 0.80;
 
-// ---- Main weapons (auto-attack stats) ----
+// ---- Main weapons ----
 const MAIN_WEAPONS = [
   // Melee
   {id:'dscim', name:'Dragon Scimitar', speedTicks:5, maxHit:48},
@@ -38,7 +36,7 @@ const MAIN_WEAPONS = [
 ];
 const MAIN_MAP = Object.fromEntries(MAIN_WEAPONS.map(w=>[w.id,w]));
 
-// ---- Spec weapons (which special move) ----
+// ---- Spec weapons ----
 const SPEC_WEAPONS = [
   // Melee
   {id:'dds',    name:'Dragon Dagger',  cost:25, type:'dds'},
@@ -97,7 +95,7 @@ function create(){
   ui.invTxt = s.add.text(W/2, H-144, invLabel(), {font:'11px Arial', color:'#a8c8ff'}).setOrigin(0.5);
 
   ui.rerollBtn = button(W/2-100, H-110, 132, 36, 'Reroll Loadouts', ()=>{
-    if(duelActive) return; // 🔒 disable during fight
+    if(duelActive) return; // 🔒
     rollBothLoadouts();
     refreshLoadoutTexts();
     ui.status.setText('Loadouts rolled. Ready!');
@@ -108,7 +106,7 @@ function create(){
   ui.rematchBtn= button(W/2+60, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
 
-  buildLootPanel();   // harmless if SHOW_LOOT=false; it just stays hidden
+  buildLootPanel();
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
@@ -125,6 +123,7 @@ function makeFighter(opts){
     specWeapon: null,
     nextAttack: 0,
     wantSpec:false,
+    armedSpecTick:-1,          // <— new: tick when player armed the spec
     specCooldown:0,
     lastSpecTick:-999
   };
@@ -205,6 +204,9 @@ function startDuel(){
   s.player.nextAttack = s.player.mainWeapon.speedTicks;
   s.enemy.nextAttack  = s.enemy.mainWeapon.speedTicks;
 
+  s.player.wantSpec=false; s.player.armedSpecTick=-1;
+  s.enemy .wantSpec=false; s.enemy .armedSpecTick=-1;
+
   if(tickEvent) tickEvent.remove(false);
   tickEvent = s.time.addEvent({ delay:TICK_MS, loop:true, callback:onTick });
 }
@@ -230,7 +232,7 @@ function onTick(){
   if(e.nextAttack<=0 && e.alive && !duelEnded){
     if(!e.wantSpec && canSpec(e)){
       const want = (p.hp <= 45) ? 0.7 : 0.25;
-      if(Math.random()<want) e.wantSpec = true;
+      if(Math.random()<want){ e.wantSpec = true; e.armedSpecTick = tickCount; }
     }
     const fired = tryFireSpecialOnTick(e, p);
     if(!fired && !duelEnded){ doSwing(e, p); if(!duelEnded) e.nextAttack = e.mainWeapon.speedTicks; }
@@ -258,7 +260,6 @@ function safeEnd(winner, loser){
   if(SHOW_LOOT && winner===s.player){
     const mainId = s.enemy.mainWeapon?.id;
     const specId = s.enemy.specWeapon?.id;
-    // defer slightly to avoid Safari’s “UI update during timer callback” hiccup
     s.time.delayedCall(40, ()=>loot_show(mainId, specId));
   }
 }
@@ -269,7 +270,7 @@ function rematch(){
   resetFighter(s.enemy);
   rollBothLoadouts();
   refreshLoadoutTexts();
-  clearNextOverrides(); // remove this line if you want the override to persist until changed
+  clearNextOverrides();
   duelEnded=false;
   ui.status.setText('Reroll loadouts, then Start Duel');
   ui.startBtn.setVisible(true);
@@ -277,21 +278,35 @@ function rematch(){
   ui.specBtn.setActiveState(false);
 }
 
-/* ---------------- Specials: ARM -> FIRE ON TICK ---------------- */
+function resetFighter(f){
+  f.hp=f.maxHp; f.alive=true;
+  f.food=FOOD_START; f.lastEatTick=-999;
+  f.spec=SPEC_MAX; f.wantSpec=false; f.armedSpecTick=-1; f.specCooldown=0; f.lastSpecTick=-999;
+  f.nextAttack=0;
+  f.body.setAlpha(1).setScale(1);
+  updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
+}
+
+/* ---------------- Specials (arm → next tick) ---------------- */
 function togglePlayerSpec(){
   const p=s.player;
   if(!duelActive || !p.alive || duelEnded) return;
-  if(p.wantSpec){ p.wantSpec=false; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
+  if(p.wantSpec){ p.wantSpec=false; p.armedSpecTick=-1; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
   if(!canSpec(p)){ ui.status.setText('Not ready (energy/cooldown)'); return; }
-  p.wantSpec=true; ui.specBtn.setActiveState(true);
+  p.wantSpec=true; p.armedSpecTick=tickCount; ui.specBtn.setActiveState(true);
   ui.status.setText('Special armed — will fire on your next tick');
 }
 function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
 function tryFireSpecialOnTick(a, d){
+  // only fire if armed and at least one full tick has elapsed since arming
   if(duelEnded) return false;
-  if(!a.wantSpec || !canSpec(a)) return false;
+  if(!a.wantSpec) return false;
+  if(a.armedSpecTick === -1 || tickCount <= a.armedSpecTick) return false;
+  if(!canSpec(a)) return false;
+
   performSpecial(a, d);
-  a.wantSpec=false; if(a===s.player) ui.specBtn.setActiveState(false);
+  a.wantSpec=false; a.armedSpecTick=-1;
+  if(a===s.player) ui.specBtn.setActiveState(false);
   return true;
 }
 function performSpecial(a, d){
@@ -300,24 +315,30 @@ function performSpecial(a, d){
   if(a.spec<cost) return;
   a.spec -= cost; updateSpecUI(a);
 
+  // After a spec, we SET nextAttack to (base + recovery), not +=
   if(spec==='dds'){
     doSwing(a,d,0.15,1.15); if(duelEnded) return;
     doSwing(a,d,0.15,1.15);
-    a.nextAttack += 1; a.specCooldown = 3; ui.status.setText(`${a.name} uses Double Stab!`);
+    a.nextAttack = a.mainWeapon.speedTicks + 1;
+    a.specCooldown = 3; ui.status.setText(`${a.name} uses Double Stab!`);
   }else if(spec==='claws'){
     const parts=[0.4,0.3,0.2,0.1];
     for(const pct of parts){ doSwing(a,d,0.1,pct*1.8); if(duelEnded) break; }
-    a.nextAttack += 2; a.specCooldown = 4; ui.status.setText(`${a.name} unleashes Claw Flurry!`);
+    a.nextAttack = a.mainWeapon.speedTicks + 2;
+    a.specCooldown = 4; ui.status.setText(`${a.name} unleashes Claw Flurry!`);
   }else if(spec==='ags'){
     doSwing(a,d,0.15,1.5);
-    a.nextAttack += 2; a.specCooldown = 4; ui.status.setText(`${a.name} smashes with AGS!`);
+    a.nextAttack = a.mainWeapon.speedTicks + 2;
+    a.specCooldown = 4; ui.status.setText(`${a.name} smashes with AGS!`);
   }else if(spec==='dbow'){
     doSwing(a,d,0.1,1.25); if(duelEnded) return;
     doSwing(a,d,0.1,1.25);
-    a.nextAttack += 2; a.specCooldown = 4; ui.status.setText(`${a.name} fires Dark Bow!`);
+    a.nextAttack = a.mainWeapon.speedTicks + 2;
+    a.specCooldown = 4; ui.status.setText(`${a.name} fires Dark Bow!`);
   }else if(spec==='vstaff'){
     doSwing(a,d,0.2,1.8);
-    a.nextAttack += 3; a.specCooldown = 5; ui.status.setText(`${a.name} channels Volatile Blast!`);
+    a.nextAttack = a.mainWeapon.speedTicks + 3;
+    a.specCooldown = 5; ui.status.setText(`${a.name} channels Volatile Blast!`);
   }
   a.lastSpecTick = tickCount;
 }
@@ -331,7 +352,6 @@ function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   const hit = Math.random() < hitChance;
   const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
 
-  // Compute lethal before applying side-effects; lethal hits skip eat and end immediately
   const lethal = dmg >= defender.hp;
 
   swingFx(attacker, defender, dmg);
@@ -353,7 +373,7 @@ function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   }
 }
 
-/* ---------------- Eating ---------------- */
+/* ---------------- Eating / regen ---------------- */
 function tryAutoEat(f){
   if(duelEnded) return;
   if(f.food<=0) return;
@@ -364,13 +384,11 @@ function tryAutoEat(f){
   f.hp = Math.min(f.maxHp, f.hp + FOOD_HEAL);
   const healed = f.hp - before;
 
-  f.nextAttack += EAT_COST_TK;
+  f.nextAttack = f.nextAttack + EAT_COST_TK; // minor delay
   updateHpUI(f); updateFoodUI(f); eatFx(f, healed);
 
   if(!duelEnded) ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
 }
-
-/* ---------------- Per-tick regen ---------------- */
 function regenSpec(f){
   if(!f.alive || duelEnded) return;
   f.spec = Math.min(SPEC_MAX, f.spec + SPEC_REGEN_PER_TICK);
@@ -462,14 +480,18 @@ function swingFx(a, d, dmg){
   s.tweens.add({targets:swipe,alpha:.95,scaleX:1,duration:120,ease:'quad.out',
     onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})
   });
-
   s.tweens.add({targets:a.body, scale:1.15, yoyo:true, duration:120});
-
   const flash=s.add.circle(d.x,d.y,8, dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
   s.tweens.add({targets:flash, radius:20, alpha:0, duration:220, onComplete:()=>flash.destroy()});
-
   const txt = s.add.text(d.x, d.y-30, dmg>0?`-${dmg}`:'0', {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
   s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
+}
+function eatFx(f, healed){
+  if(duelEnded) return;
+  const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
+  s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
+  const t=s.add.text(f.x, f.y-64, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
+  s.tweens.add({targets:t, y:f.y-80, alpha:0, duration:700, onComplete:()=>t.destroy()});
 }
 
 /* ---------------- UI updates ---------------- */
