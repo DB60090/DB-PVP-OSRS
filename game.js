@@ -1,8 +1,7 @@
-/* RuneScape-style PvP (offline) — minimal Phaser 3 sandbox
+/* RuneScape-style PvP (offline) — iPhone-friendly
    - 600 ms tick engine
-   - Weapon speeds in ticks + max hits
-   - Player vs Bot symmetry
-   - Swap weapons with 1/2/3
+   - On-screen weapon buttons (no keyboard)
+   - Start/Rematch button lifted above iOS bottom bar
 */
 
 const W=420, H=640;
@@ -19,9 +18,9 @@ new Phaser.Game(config);
 // --- Core combat constants ---
 const TICK_MS = 600; // RuneScape vibe
 const WEAPONS = {
-  sword: {id:'sword', name:'Sword', speedTicks:6,  maxHit:50},
-  dagger:{id:'dagger',name:'Dagger',speedTicks:4,  maxHit:30},
-  axe:   {id:'axe',   name:'Axe',   speedTicks:8,  maxHit:70},
+  sword: {id:'sword', name:'Sword',  speedTicks:6, maxHit:50},
+  dagger:{id:'dagger',name:'Dagger', speedTicks:4, maxHit:30},
+  axe:   {id:'axe',   name:'Axe',    speedTicks:8, maxHit:70},
 };
 
 // --- Runtime state ---
@@ -47,26 +46,22 @@ function create(){
   const p = makeFighter({ name:'You',   x:leftX,  y,  color:0x66ccff, outline:0x003355,  weapon:WEAPONS.sword });
   const e = makeFighter({ name:'Bot',   x:rightX, y,  color:0xff8888, outline:0x4b1b1b,  weapon:WEAPONS.dagger });
 
-  // Store globally for convenience
   s.player=p; s.enemy=e;
 
-  // UI: HP labels
+  // Labels
   p.nameText = s.add.text(p.x, p.y-46, `${p.name}`, {font:'12px Arial', color:'#d6e8ff'}).setOrigin(0.5);
   e.nameText = s.add.text(e.x, e.y-46, `${e.name}`, {font:'12px Arial', color:'#ffd6d6'}).setOrigin(0.5);
 
-  // UI: action/status
-  ui.status = s.add.text(W/2, H-80, 'Press Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
+  // Status text
+  ui.status = s.add.text(W/2, H-122, 'Pick a weapon, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
 
-  // Buttons
-  ui.startBtn = button(W/2, H-44, 150, 40, 'Start Duel', ()=>startDuel());
-  ui.rematchBtn = button(W/2, H-44, 150, 40, 'Rematch', ()=>rematch());
+  // Weapon bar (big touch targets)
+  createWeaponBar();
+
+  // Start/Rematch button — lifted higher so it’s not under Safari bar
+  ui.startBtn = button(W/2, H-74, 170, 44, 'Start Duel', ()=>startDuel());
+  ui.rematchBtn = button(W/2, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
-
-  // Keyboard: quick weapon switches
-  s.input.keyboard.on('keydown-ONE',  ()=>setWeapon(p, WEAPONS.sword, 'Equipped Sword'));
-  s.input.keyboard.on('keydown-TWO',  ()=>setWeapon(p, WEAPONS.dagger,'Equipped Dagger'));
-  s.input.keyboard.on('keydown-THREE',()=>setWeapon(p, WEAPONS.axe,   'Equipped Axe'));
-  s.input.keyboard.on('keydown-R',    ()=>rematch());
 
   // Bot random weapon swaps every ~6–10 seconds (only during duel)
   s.time.addEvent({
@@ -76,7 +71,8 @@ function create(){
       if(!duelActive) return;
       const pool=[WEAPONS.sword, WEAPONS.dagger, WEAPONS.axe];
       const pick=Phaser.Utils.Array.GetRandom(pool);
-      setWeapon(e, pick, `${e.name} switches to ${pick.name}`, true);
+      setWeapon(s.enemy, pick, `${s.enemy.name} switches to ${pick.name}`, true);
+      highlightWeapon(); // keep player highlight intact
     }
   });
 }
@@ -91,10 +87,8 @@ function makeFighter(opts){
     weapon: opts.weapon,
     alive: true
   };
-  // Body
   const r=18;
   f.body = s.add.circle(f.x, f.y, r, opts.color).setStrokeStyle(3, opts.outline);
-  // HP bar
   const barW=110, barH=10;
   f.hpBg   = s.add.rectangle(f.x, f.y-28, barW, barH, 0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
   f.hpFill = s.add.rectangle(f.x-barW/2, f.y-28, barW, barH-2, 0x4dd06d).setOrigin(0,0.5);
@@ -115,6 +109,54 @@ function button(x,y,w,h,label,onClick){
   return bg;
 }
 
+function createWeaponBar(){
+  // Container row
+  const y = H-170;
+  ui.weaponBtns = [];
+
+  const items = [
+    {key:'sword',  w:WEAPONS.sword},
+    {key:'dagger', w:WEAPONS.dagger},
+    {key:'axe',    w:WEAPONS.axe}
+  ];
+
+  const spacing = 126;
+  const startX = W/2 - spacing;
+
+  items.forEach((it,i)=>{
+    const x = startX + i*spacing;
+    const btn = weaponButton(x, y, 108, 44, it.w.name, ()=> {
+      setWeapon(s.player, it.w, `Equipped ${it.w.name}`);
+      highlightWeapon();
+    });
+    btn._weaponKey = it.key;
+    ui.weaponBtns.push(btn);
+  });
+
+  highlightWeapon();
+}
+
+function weaponButton(x,y,w,h,label,onClick){
+  const bg=s.add.rectangle(x,y,w,h,0x293245).setStrokeStyle(2,0x18202c).setOrigin(0.5).setInteractive({useHandCursor:true});
+  const txt=s.add.text(x,y,label,{font:'14px Arial',color:'#d6e8ff'}).setOrigin(0.5);
+  bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
+  bg.on('pointerup',()=>bg.setScale(1));
+  bg.on('pointerout',()=>bg.setScale(1));
+  bg.setActiveState=(active)=>{
+    bg.setStrokeStyle(2, active?0x9fdcff:0x18202c);
+    txt.setColor(active?'#ffffff':'#d6e8ff');
+  };
+  return bg;
+}
+
+function highlightWeapon(){
+  const current = s.player.weapon.id;
+  ui.weaponBtns.forEach(btn=>{
+    const active = (btn._weaponKey === current);
+    btn.setActiveState(active);
+  });
+}
+
 /* --------- Combat control --------- */
 function startDuel(){
   if(duelActive) return;
@@ -123,11 +165,9 @@ function startDuel(){
   ui.startBtn.setVisible(false);
   ui.rematchBtn.setVisible(false);
 
-  // Reset counters so both can attack soon
   s.player.nextAttack = s.player.weapon.speedTicks;
   s.enemy.nextAttack  = s.enemy.weapon.speedTicks;
 
-  // Start global tick
   if(tickEvent) tickEvent.remove(false);
   tickEvent = s.time.addEvent({ delay:TICK_MS, loop:true, callback: onTick });
 }
@@ -141,13 +181,10 @@ function onTick(){
   p.nextAttack--;
   e.nextAttack--;
 
-  // Player swing
   if(p.nextAttack<=0 && p.alive){
     doSwing(p, e);
     p.nextAttack = p.weapon.speedTicks;
   }
-
-  // Enemy swing
   if(e.nextAttack<=0 && e.alive){
     doSwing(e, p);
     e.nextAttack = e.weapon.speedTicks;
@@ -161,11 +198,9 @@ function stopDuel(){
 }
 
 function rematch(){
-  // Reset fighters
-  const p=s.player, e=s.enemy;
-  resetFighter(p);
-  resetFighter(e);
-  ui.status.setText('Press Start Duel');
+  resetFighter(s.player);
+  resetFighter(s.enemy);
+  ui.status.setText('Pick a weapon, then Start Duel');
   ui.startBtn.setVisible(true);
   ui.rematchBtn.setVisible(false);
 }
@@ -180,8 +215,7 @@ function resetFighter(f){
 function doSwing(attacker, defender){
   if(!attacker.alive || !defender.alive) return;
 
-  // Accuracy/damage model (very simple):
-  // 80% chance to hit; damage 0..maxHit (0 treated as a splash/miss)
+  // Simple accuracy model:
   const hitRoll = Math.random() < 0.80;
   const dmg = hitRoll ? Phaser.Math.Between(0, attacker.weapon.maxHit) : 0;
 
@@ -201,7 +235,6 @@ function doSwing(attacker, defender){
 
 /* --------- Visual FX --------- */
 function swingFx(a, d, dmg){
-  // swipe line
   const ang=Phaser.Math.Angle.Between(a.x, a.y, d.x, d.y);
   const dist=Phaser.Math.Distance.Between(a.x,a.y,d.x,d.y)-18;
   const swipe=s.add.rectangle(a.x,a.y,Math.max(8,dist),6,0x99ddff).setStrokeStyle(2,0xcfeaff)
@@ -210,10 +243,8 @@ function swingFx(a, d, dmg){
     onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})
   });
 
-  // attacker pop
   s.tweens.add({targets:a.body, scale:1.15, yoyo:true, duration:120});
 
-  // defender impact + floating dmg
   const flash=s.add.circle(d.x,d.y,8, dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
   s.tweens.add({targets:flash, radius:20, alpha:0, duration:220, onComplete:()=>flash.destroy()});
 
