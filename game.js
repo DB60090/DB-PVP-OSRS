@@ -1,7 +1,7 @@
-/* RuneScape-style PvP (offline) — iPhone-friendly
+/* RuneScape-style PvP (offline) — iPhone-friendly + Auto-Eat
    - 600 ms tick engine
    - On-screen weapon buttons (no keyboard)
-   - Start/Rematch button lifted above iOS bottom bar
+   - Auto-eat at <= 50 HP, 10 food each, +20 heal, costs 1 tick
 */
 
 const W=420, H=640;
@@ -23,10 +23,17 @@ const WEAPONS = {
   axe:   {id:'axe',   name:'Axe',    speedTicks:8, maxHit:70},
 };
 
+// --- Food config ---
+const EAT_AT_HP   = 50;   // auto-eat threshold
+const FOOD_HEAL   = 20;   // hp restored per food
+const FOOD_START  = 10;   // starting food pieces
+const EAT_COST_TK = 1;    // eating delays next attack by 1 tick
+
 // --- Runtime state ---
 let s;                    // scene
 let ui={};               // texts & buttons
 let tickEvent=null;      // global tick loop
+let tickCount=0;         // to avoid double-eating in the same tick
 let duelActive=false;
 
 function preload(){}
@@ -85,7 +92,9 @@ function makeFighter(opts){
     hp: 99, maxHp: 99,
     nextAttack: 0,
     weapon: opts.weapon,
-    alive: true
+    alive: true,
+    food: FOOD_START,
+    lastEatTick: -999
   };
   const r=18;
   f.body = s.add.circle(f.x, f.y, r, opts.color).setStrokeStyle(3, opts.outline);
@@ -94,7 +103,12 @@ function makeFighter(opts){
   f.hpFill = s.add.rectangle(f.x-barW/2, f.y-28, barW, barH-2, 0x4dd06d).setOrigin(0,0.5);
   f.hpText = s.add.text(f.x, f.y-28, '', {font:'11px Arial', color:'#ffffff'}).setOrigin(0.5);
 
+  // Food UI under HP bar
+  f.foodBg  = s.add.rectangle(f.x, f.y-12, 48, 14, 0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.foodTxt = s.add.text(f.x, f.y-12, `Food: ${f.food}`, {font:'10px Arial', color:'#cfe8ff'}).setOrigin(0.5);
+
   updateHpUI(f);
+  updateFoodUI(f);
   return f;
 }
 
@@ -175,6 +189,8 @@ function startDuel(){
 function onTick(){
   if(!duelActive) return;
 
+  tickCount++;
+
   const p=s.player, e=s.enemy;
   if(!p.alive || !e.alive){ stopDuel(); return; }
 
@@ -207,8 +223,10 @@ function rematch(){
 
 function resetFighter(f){
   f.hp = f.maxHp; f.alive=true; f.nextAttack=0;
+  f.food = FOOD_START; f.lastEatTick=-999;
   f.body.setAlpha(1).setScale(1);
   updateHpUI(f);
+  updateFoodUI(f);
 }
 
 /* --------- Swing / Damage --------- */
@@ -224,12 +242,48 @@ function doSwing(attacker, defender){
   if(dmg>0){
     defender.hp = Math.max(0, defender.hp - dmg);
     updateHpUI(defender);
+
+    // If still alive and at/below threshold, try to auto-eat immediately
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP){
+      tryAutoEat(defender);
+    }
+
     if(defender.hp<=0){
       defender.alive=false;
       deathFx(defender);
       ui.status.setText(`${attacker.name} wins!`);
       stopDuel();
     }
+  }else{
+    // Miss splash; opportunistic eat if already very low
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP){
+      tryAutoEat(defender);
+    }
+  }
+}
+
+/* --------- Eating logic --------- */
+function tryAutoEat(f){
+  if(f.food<=0) return;
+  if(f.lastEatTick===tickCount) return; // only once per tick
+  f.food--;
+  f.lastEatTick=tickCount;
+
+  const before=f.hp;
+  f.hp = Math.min(f.maxHp, f.hp + FOOD_HEAL);
+  const healed = f.hp - before;
+
+  // Eating costs a tick (slows their next swing)
+  f.nextAttack += EAT_COST_TK;
+
+  updateHpUI(f);
+  updateFoodUI(f);
+  eatFx(f, healed);
+
+  if(f===s.player){
+    ui.status.setText(`You eat (+${healed}) — Food left: ${f.food}`);
+  }else{
+    ui.status.setText(`Bot eats (+${healed}) — Food left: ${f.food}`);
   }
 }
 
@@ -252,6 +306,14 @@ function swingFx(a, d, dmg){
   s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
 }
 
+function eatFx(f, healed){
+  // small green pulse + +heal text
+  const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
+  s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
+  const t=s.add.text(f.x, f.y-48, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
+  s.tweens.add({targets:t, y:f.y-64, alpha:0, duration:700, onComplete:()=>t.destroy()});
+}
+
 function deathFx(f){
   s.tweens.add({targets:f.body, scale:1.35, alpha:0, duration:320});
 }
@@ -264,6 +326,13 @@ function updateHpUI(f){
   f.hpFill.fillColor = r>0.5 ? 0x4dd06d : (r>0.2 ? 0xf1c14e : 0xe86a6a);
   if(!f.hpText) return;
   f.hpText.setText(`${f.hp}/${f.maxHp}`);
+}
+
+function updateFoodUI(f){
+  if(!f.foodTxt) return;
+  f.foodTxt.setText(`Food: ${f.food}`);
+  f.foodTxt.setColor(f.food>0 ? '#cfe8ff' : '#ffaaaa');
+  f.foodBg.fillColor = f.food>0 ? 0x1f2a3a : 0x3a2222;
 }
 
 /* --------- Weapons --------- */
