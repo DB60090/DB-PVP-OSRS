@@ -1,7 +1,8 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Armor Triangle
-   - Loadouts locked during duel (no mid-fight changes)
-   - Melee/Ranged/Mage triangle: dmg 0.8/1.0/1.2, acc +/-0.05
-   - Main weapons can be Melee/Ranged/Mage (Sword, Dagger, Axe, Bow, Staff)
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts (No Armour)
+   - Loadouts locked during duel
+   - Main weapons: D Scim / Whip / MSB / Dragon Knives / Fire Surge / Ice Blitz
+   - Specs: DDS, Claws, AGS, Dark Bow, Volatile Staff
+   - Specials arm first, fire on next attack tick; have cooldowns
 */
 
 const W=420, H=640;
@@ -19,34 +20,32 @@ new Phaser.Game(config);
 const TICK_MS = 600;
 const BASE_ACCURACY = 0.80;
 
-// ---- Styles / Armor ----
+// ---- Styles ----
 const STYLES = { MELEE:'Melee', RANGED:'Ranged', MAGE:'Mage' };
 
-// Triangle numbers
-const TRI_DMG = { WEAK:0.8, EVEN:1.0, STRONG:1.2 };
-const TRI_ACC = { WEAK:-0.05, EVEN:0.0, STRONG:+0.05 };
-
-// ---- Main weapons (auto-attack) ----
+// ---- Main weapons (auto-attack stats only) ----
 const MAIN_WEAPONS = [
-  {id:'sword',  name:'Sword',  style:STYLES.MELEE,  speedTicks:6, maxHit:50},
-  {id:'dagger', name:'Dagger', style:STYLES.MELEE,  speedTicks:4, maxHit:30},
-  {id:'axe',    name:'Axe',    style:STYLES.MELEE,  speedTicks:8, maxHit:70},
-  {id:'bow',    name:'Bow',    style:STYLES.RANGED, speedTicks:5, maxHit:40},
-  {id:'staff',  name:'Staff',  style:STYLES.MAGE,   speedTicks:5, maxHit:45},
+  // Melee
+  {id:'dscim', name:'Dragon Scimitar', style:STYLES.MELEE,  speedTicks:5, maxHit:48},
+  {id:'whip',  name:'Abyssal Whip',    style:STYLES.MELEE,  speedTicks:4, maxHit:42},
+  // Ranged
+  {id:'msb',   name:'Magic Shortbow',  style:STYLES.RANGED, speedTicks:5, maxHit:40},
+  {id:'dkn',   name:'Dragon Knives',   style:STYLES.RANGED, speedTicks:3, maxHit:25},
+  // Magic
+  {id:'fsurge',name:'Fire Surge',      style:STYLES.MAGE,   speedTicks:5, maxHit:48},
+  {id:'iblitz',name:'Ice Blitz',       style:STYLES.MAGE,   speedTicks:5, maxHit:44},
 ];
 
-// ---- Spec weapons (special move carried), keep melee-inspired for now ----
+// ---- Spec weapons (which special move) ----
 const SPEC_WEAPONS = [
-  {id:'dds',    name:'Dragon Dagger', cost:25, type:'dds'},   // double stab
-  {id:'dclaws', name:'Dragon Claws',  cost:50, type:'claws'}, // 4-hit flurry
-  {id:'ags',    name:'Armadyl GS',    cost:50, type:'ags'},   // big slam
-];
-
-// ---- Armor options ----
-const ARMOR = [
-  {id:'meleearmor',  name:'Melee',  style:STYLES.MELEE},
-  {id:'rangearmor',  name:'Ranged', style:STYLES.RANGED},
-  {id:'magearmor',   name:'Mage',   style:STYLES.MAGE},
+  // Melee
+  {id:'dds',    name:'Dragon Dagger',  cost:25, type:'dds'},    // 2 accurate pokes
+  {id:'dclaws', name:'Dragon Claws',   cost:50, type:'claws'},  // 4-hit flurry
+  {id:'ags',    name:'Armadyl GS',     cost:50, type:'ags'},    // big slam
+  // Ranged
+  {id:'dbow',   name:'Dark Bow',       cost:50, type:'dbow'},   // 2 heavy arrows
+  // Magic
+  {id:'vstaff', name:'Volatile Staff', cost:55, type:'vstaff'}, // massive single hit
 ];
 
 // ---- Food / spec energy ----
@@ -70,24 +69,27 @@ function create(){
 
   s.player=p; s.enemy=e;
 
-  // Labels and loadout/armor lines
+  // Labels & loadout lines
   p.nameText   = s.add.text(p.x, p.y-84, `${p.name}`, {font:'12px Arial', color:'#d6e8ff'}).setOrigin(0.5);
   e.nameText   = s.add.text(e.x, e.y-84, `${e.name}`, {font:'12px Arial', color:'#ffd6d6'}).setOrigin(0.5);
   p.loadoutTxt = s.add.text(p.x, p.y-72, '', {font:'10px Arial', color:'#bfe0ff'}).setOrigin(0.5);
   e.loadoutTxt = s.add.text(e.x, e.y-72, '', {font:'10px Arial', color:'#ffd6d6'}).setOrigin(0.5);
-  p.armorTxt   = s.add.text(p.x, p.y-60, '', {font:'10px Arial', color:'#cfe8ff'}).setOrigin(0.5);
-  e.armorTxt   = s.add.text(e.x, e.y-60, '', {font:'10px Arial', color:'#ffd6d6'}).setOrigin(0.5);
 
   ui.status    = s.add.text(W/2, H-152, 'Reroll loadouts, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
 
-  // Buttons
-  ui.rerollBtn = button(W/2-110, H-110, 150, 36, 'Reroll Loadouts', ()=>{ if(duelActive) return; rollBothLoadouts(); refreshLoadoutTexts(); ui.status.setText('Loadouts rolled. Ready!'); });
+  // Buttons (Reroll locked during duel)
+  ui.rerollBtn = button(W/2-110, H-110, 150, 36, 'Reroll Loadouts', ()=>{
+    if(duelActive) return;
+    rollBothLoadouts(); refreshLoadoutTexts();
+    ui.status.setText('Loadouts rolled. Ready!');
+  });
+
   ui.specBtn   = smallButton(W/2+110, H-110, 108, 36, 'SPEC', togglePlayerSpec);
   ui.startBtn  = button(W/2+60, H-74, 170, 44, 'Start Duel', ()=>startDuel());
   ui.rematchBtn= button(W/2+60, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
 
-  // Initial loadouts (locked once fight starts)
+  // Initial loadouts
   rollBothLoadouts(); refreshLoadoutTexts();
 }
 
@@ -99,7 +101,7 @@ function makeFighter(opts){
     hp: 99, maxHp:99, alive:true,
     food: FOOD_START, lastEatTick:-999,
     spec: SPEC_MAX, wantSpec:false, specCooldown:0, lastSpecTick:-999,
-    mainWeapon:null, specWeapon:null, armor:null,
+    mainWeapon:null, specWeapon:null,
     nextAttack:0
   };
   const r=18;
@@ -145,38 +147,24 @@ function pickRandom(arr){ return arr[(Math.random()*arr.length)|0]; }
 function rollLoadout(f){
   f.mainWeapon = pickRandom(MAIN_WEAPONS);
   f.specWeapon = pickRandom(SPEC_WEAPONS);
-  f.armor      = pickRandom(ARMOR);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function refreshLoadoutTexts(){
   const p=s.player, e=s.enemy;
   p.loadoutTxt.setText(`Main: ${p.mainWeapon.name} (${p.mainWeapon.style}) | Spec: ${p.specWeapon.name}`);
   e.loadoutTxt.setText(`Main: ${e.mainWeapon.name} (${e.mainWeapon.style}) | Spec: ${e.specWeapon.name}`);
-  p.armorTxt.setText(`Armor: ${p.armor.name}`);  e.armorTxt.setText(`Armor: ${e.armor.name}`);
   ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
 }
 
-/* ---------------- Triangle helper ---------------- */
-function triangle(attackerStyle, defenderArmorStyle){
-  // Returns {dmgMult, accBonus}
-  if(attackerStyle===defenderArmorStyle) return {dmgMult:TRI_DMG.EVEN, accBonus:TRI_ACC.EVEN};
-  if(attackerStyle===STYLES.MELEE && defenderArmorStyle===STYLES.RANGED) return {dmgMult:TRI_DMG.STRONG, accBonus:TRI_ACC.STRONG};
-  if(attackerStyle===STYLES.RANGED && defenderArmorStyle===STYLES.MAGE)  return {dmgMult:TRI_DMG.STRONG, accBonus:TRI_ACC.STRONG};
-  if(attackerStyle===STYLES.MAGE   && defenderArmorStyle===STYLES.MELEE) return {dmgMult:TRI_DMG.STRONG, accBonus:TRI_ACC.STRONG};
-  // else attacker is weak against defender’s armor
-  return {dmgMult:TRI_DMG.WEAK, accBonus:TRI_ACC.WEAK};
-}
-
-/* ---------------- Specials: ARM -> FIRE ON TICK ---------------- */
+/* ---------------- Special arming (player) ---------------- */
 function togglePlayerSpec(){
   const p=s.player;
   if(!duelActive || !p.alive) return;
   if(p.wantSpec){ p.wantSpec=false; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
   if(!canSpec(p)){ ui.status.setText('Not ready (energy/cooldown)'); return; }
   p.wantSpec=true; ui.specBtn.setActiveState(true);
-  ui.status.setText('Special armed — will fire on your next tick');
+  ui.status.setText('Special armed — fires on your next tick');
 }
-
 function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
 
 /* ---------------- Combat flow ---------------- */
@@ -187,7 +175,6 @@ function startDuel(){
   ui.startBtn.setVisible(false);
   ui.rematchBtn.setVisible(false);
 
-  // hide "reroll" visual feedback (but keeping it visible is fine; we gate clicks)
   s.player.nextAttack = s.player.mainWeapon.speedTicks;
   s.enemy.nextAttack  = s.enemy.mainWeapon.speedTicks;
 
@@ -218,7 +205,7 @@ function onTick(){
     }
   }
 
-  // Enemy tick: AI arms only before its tick, fires only on tick
+  // Enemy tick: AI arms before tick, fires only on tick
   if(e.nextAttack<=0 && e.alive){
     if(!e.wantSpec && canSpec(e)){
       const want = (p.hp <= 45) ? 0.7 : 0.25;
@@ -257,7 +244,7 @@ function resetFighter(f){
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
 }
 
-/* ---------------- Tick-fire specials ---------------- */
+/* ---------------- Tick-gated specials ---------------- */
 function tryFireSpecialOnTick(a, d){
   if(!a.wantSpec || !canSpec(a)) return false;
   performSpecial(a, d);
@@ -269,43 +256,53 @@ function performSpecial(a, d){
   const spec=a.specWeapon.type, cost=a.specWeapon.cost;
   if(a.spec<cost) return;
 
-  // Spend spec now
+  // Spend spec
   a.spec -= cost; updateSpecUI(a);
 
-  // Triangle modifiers (specs are melee-flavored; we’ll treat them as MELEE attacks)
-  const specStyle = STYLES.MELEE;
-  const tri = triangle(specStyle, d.armor.style);
-
+  // NOTE: Specials ignore style triangles now (no armour); we just apply tuned acc/dmg
   if(spec==='dds'){ // 2 fast accurate pokes
-    doSwing(a, d, 0.15 + tri.accBonus, 1.15 * tri.dmgMult);
-    doSwing(a, d, 0.15 + tri.accBonus, 1.15 * tri.dmgMult);
+    doSwing(a, d, 0.15, 1.15);
+    doSwing(a, d, 0.15, 1.15);
     a.nextAttack = a.mainWeapon.speedTicks + 1;
     a.specCooldown = 3;
     ui.status.setText(`${a.name} uses Double Stab!`);
+
   }else if(spec==='claws'){ // 4 descending
     const parts=[0.40,0.30,0.20,0.10];
-    parts.forEach(pct=> doSwing(a, d, 0.10 + tri.accBonus, (pct*1.8) * tri.dmgMult));
+    parts.forEach(pct=> doSwing(a, d, 0.10, pct*1.8));
     a.nextAttack = a.mainWeapon.speedTicks + 2;
     a.specCooldown = 4;
     ui.status.setText(`${a.name} unleashes Claw Flurry!`);
+
   }else if(spec==='ags'){ // big slam
-    doSwing(a, d, 0.15 + tri.accBonus, 1.5 * tri.dmgMult);
+    doSwing(a, d, 0.15, 1.5);
     a.nextAttack = a.mainWeapon.speedTicks + 2;
     a.specCooldown = 4;
     ui.status.setText(`${a.name} smashes with AGS!`);
+
+  }else if(spec==='dbow'){ // Dark Bow: 2 heavy arrows (higher min feel via multiplier)
+    doSwing(a, d, 0.10, 1.25);
+    doSwing(a, d, 0.10, 1.25);
+    a.nextAttack = a.mainWeapon.speedTicks + 2;
+    a.specCooldown = 4;
+    ui.status.setText(`${a.name} fires Dark Bow!`);
+
+  }else if(spec==='vstaff'){ // Volatile Staff: massive accurate single hit
+    doSwing(a, d, 0.20, 1.8);
+    a.nextAttack = a.mainWeapon.speedTicks + 3;
+    a.specCooldown = 5;
+    ui.status.setText(`${a.name} channels Volatile Blast!`);
   }
+
   a.lastSpecTick = tickCount;
 }
 
-/* ---------------- Autos / damage w/ triangle ---------------- */
+/* ---------------- Autos / damage ---------------- */
 function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   if(!attacker.alive || !defender.alive) return;
 
-  // Triangle based on ATTACKER MAIN STYLE vs DEFENDER ARMOR STYLE
-  const tri = triangle(attacker.mainWeapon.style, defender.armor.style);
-
-  const max = Math.round(attacker.mainWeapon.maxHit * dmgMult * tri.dmgMult);
-  const hitChance = Math.min(0.98, Math.max(0, BASE_ACCURACY + accBonus + tri.accBonus));
+  const max = Math.round(attacker.mainWeapon.maxHit * dmgMult);
+  const hitChance = Math.min(0.98, Math.max(0, BASE_ACCURACY + accBonus));
   const hit = Math.random() < hitChance;
   const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
 
@@ -352,9 +349,12 @@ function swingFx(a, d, dmg){
   s.tweens.add({targets:swipe,alpha:.95,scaleX:1,duration:120,ease:'quad.out',
     onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})
   });
+
   s.tweens.add({targets:a.body, scale:1.15, yoyo:true, duration:120});
+
   const flash=s.add.circle(d.x,d.y,8, dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
   s.tweens.add({targets:flash, radius:20, alpha:0, duration:220, onComplete:()=>flash.destroy()});
+
   const txt = s.add.text(d.x, d.y-30, dmg>0?`-${dmg}`:'0', {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
   s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
 }
