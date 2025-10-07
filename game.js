@@ -1,7 +1,8 @@
-/* RuneScape-style PvP (offline) — iPhone-friendly + Auto-Eat
+/* RuneScape-style PvP (offline) — iPhone + Food + Specials
    - 600 ms tick engine
    - On-screen weapon buttons (no keyboard)
    - Auto-eat at <= 50 HP, 10 food each, +20 heal, costs 1 tick
+   - OSRS-inspired specials with special energy bar + regen
 */
 
 const W=420, H=640;
@@ -16,11 +17,11 @@ const config={
 new Phaser.Game(config);
 
 // --- Core combat constants ---
-const TICK_MS = 600; // RuneScape vibe
+const TICK_MS = 600; // RuneScape-like tick
 const WEAPONS = {
-  sword: {id:'sword', name:'Sword',  speedTicks:6, maxHit:50},
-  dagger:{id:'dagger',name:'Dagger', speedTicks:4, maxHit:30},
-  axe:   {id:'axe',   name:'Axe',    speedTicks:8, maxHit:70},
+  sword: {id:'sword', name:'Sword',  speedTicks:6, maxHit:50, specCost:50}, // claws-style
+  dagger:{id:'dagger',name:'Dagger', speedTicks:4, maxHit:30, specCost:25}, // dds-style
+  axe:   {id:'axe',   name:'Axe',    speedTicks:8, maxHit:70, specCost:50}, // ags-style
 };
 
 // --- Food config ---
@@ -29,11 +30,18 @@ const FOOD_HEAL   = 20;   // hp restored per food
 const FOOD_START  = 10;   // starting food pieces
 const EAT_COST_TK = 1;    // eating delays next attack by 1 tick
 
+// --- Special energy ---
+const SPEC_MAX = 100;
+const SPEC_REGEN_PER_TICK = 2; // +2% per 600ms ≈ 30s to full
+
+// --- Hit model (simple, tweakable) ---
+const BASE_ACCURACY = 0.80; // 80% to hit on normal
+
 // --- Runtime state ---
 let s;                    // scene
 let ui={};               // texts & buttons
 let tickEvent=null;      // global tick loop
-let tickCount=0;         // to avoid double-eating in the same tick
+let tickCount=0;         // to gate once-per-tick events
 let duelActive=false;
 
 function preload(){}
@@ -56,18 +64,22 @@ function create(){
   s.player=p; s.enemy=e;
 
   // Labels
-  p.nameText = s.add.text(p.x, p.y-46, `${p.name}`, {font:'12px Arial', color:'#d6e8ff'}).setOrigin(0.5);
-  e.nameText = s.add.text(e.x, e.y-46, `${e.name}`, {font:'12px Arial', color:'#ffd6d6'}).setOrigin(0.5);
+  p.nameText = s.add.text(p.x, p.y-60, `${p.name}`, {font:'12px Arial', color:'#d6e8ff'}).setOrigin(0.5);
+  e.nameText = s.add.text(e.x, e.y-60, `${e.name}`, {font:'12px Arial', color:'#ffd6d6'}).setOrigin(0.5);
 
   // Status text
-  ui.status = s.add.text(W/2, H-122, 'Pick a weapon, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
+  ui.status = s.add.text(W/2, H-140, 'Pick a weapon, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
 
   // Weapon bar (big touch targets)
   createWeaponBar();
 
+  // Special button (player)
+  ui.specBtn = smallButton(W/2-112, H-100, 108, 36, 'SPECIAL', ()=>trySpecial(s.player, s.enemy));
+  ui.specHint = s.add.text(W/2-112, H-121, 'Spec', {font:'11px Arial', color:'#cfe8ff'}).setOrigin(0.5);
+
   // Start/Rematch button — lifted higher so it’s not under Safari bar
-  ui.startBtn = button(W/2, H-74, 170, 44, 'Start Duel', ()=>startDuel());
-  ui.rematchBtn = button(W/2, H-74, 170, 44, 'Rematch', ()=>rematch());
+  ui.startBtn   = button(W/2+60, H-74, 170, 44, 'Start Duel', ()=>startDuel());
+  ui.rematchBtn = button(W/2+60, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
 
   // Bot random weapon swaps every ~6–10 seconds (only during duel)
@@ -94,21 +106,30 @@ function makeFighter(opts){
     weapon: opts.weapon,
     alive: true,
     food: FOOD_START,
-    lastEatTick: -999
+    lastEatTick: -999,
+    spec: SPEC_MAX
   };
   const r=18;
   f.body = s.add.circle(f.x, f.y, r, opts.color).setStrokeStyle(3, opts.outline);
+
+  // HP bar
   const barW=110, barH=10;
-  f.hpBg   = s.add.rectangle(f.x, f.y-28, barW, barH, 0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
-  f.hpFill = s.add.rectangle(f.x-barW/2, f.y-28, barW, barH-2, 0x4dd06d).setOrigin(0,0.5);
-  f.hpText = s.add.text(f.x, f.y-28, '', {font:'11px Arial', color:'#ffffff'}).setOrigin(0.5);
+  f.hpBg   = s.add.rectangle(f.x, f.y-36, barW, barH, 0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
+  f.hpFill = s.add.rectangle(f.x-barW/2, f.y-36, barW, barH-2, 0x4dd06d).setOrigin(0,0.5);
+  f.hpText = s.add.text(f.x, f.y-36, '', {font:'11px Arial', color:'#ffffff'}).setOrigin(0.5);
 
   // Food UI under HP bar
-  f.foodBg  = s.add.rectangle(f.x, f.y-12, 48, 14, 0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
-  f.foodTxt = s.add.text(f.x, f.y-12, `Food: ${f.food}`, {font:'10px Arial', color:'#cfe8ff'}).setOrigin(0.5);
+  f.foodBg  = s.add.rectangle(f.x, f.y-18, 56, 14, 0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.foodTxt = s.add.text(f.x, f.y-18, `Food: ${f.food}`, {font:'10px Arial', color:'#cfe8ff'}).setOrigin(0.5);
+
+  // Special energy bar (thin)
+  f.specBg  = s.add.rectangle(f.x, f.y-6, 110, 6, 0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.specFill= s.add.rectangle(f.x-55, f.y-6, 110, 4, 0x6fd1ff).setOrigin(0,0.5);
+  f.specTxt = s.add.text(f.x, f.y+10, `Spec ${f.spec}%`, {font:'10px Arial', color:'#cfe8ff'}).setOrigin(0.5);
 
   updateHpUI(f);
   updateFoodUI(f);
+  updateSpecUI(f);
   return f;
 }
 
@@ -122,9 +143,16 @@ function button(x,y,w,h,label,onClick){
   bg.setLabel = (t)=>txt.setText(t);
   return bg;
 }
+function smallButton(x,y,w,h,label,onClick){
+  const bg=s.add.rectangle(x,y,w,h,0x23324a).setStrokeStyle(2,0x152033).setOrigin(0.5).setInteractive({useHandCursor:true});
+  const txt=s.add.text(x,y,label,{font:'13px Arial',color:'#d6e8ff'}).setOrigin(0.5);
+  bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
+  bg.on('pointerup',()=>bg.setScale(1));
+  bg.on('pointerout',()=>bg.setScale(1));
+  return bg;
+}
 
 function createWeaponBar(){
-  // Container row
   const y = H-170;
   ui.weaponBtns = [];
 
@@ -194,16 +222,27 @@ function onTick(){
   const p=s.player, e=s.enemy;
   if(!p.alive || !e.alive){ stopDuel(); return; }
 
+  // Regen spec energy
+  regenSpec(p);
+  regenSpec(e);
+
   p.nextAttack--;
   e.nextAttack--;
 
+  // Player attacks normally on their cadence (specs are manual button)
   if(p.nextAttack<=0 && p.alive){
     doSwing(p, e);
     p.nextAttack = p.weapon.speedTicks;
   }
+
+  // Enemy AI: sometimes specials when ready
   if(e.nextAttack<=0 && e.alive){
-    doSwing(e, p);
-    e.nextAttack = e.weapon.speedTicks;
+    if(tryEnemySpecial(e, p)){
+      // special fired; nextAttack has been set by the special
+    }else{
+      doSwing(e, p);
+      e.nextAttack = e.weapon.speedTicks;
+    }
   }
 }
 
@@ -224,18 +263,21 @@ function rematch(){
 function resetFighter(f){
   f.hp = f.maxHp; f.alive=true; f.nextAttack=0;
   f.food = FOOD_START; f.lastEatTick=-999;
+  f.spec = SPEC_MAX;
   f.body.setAlpha(1).setScale(1);
   updateHpUI(f);
   updateFoodUI(f);
+  updateSpecUI(f);
 }
 
 /* --------- Swing / Damage --------- */
-function doSwing(attacker, defender){
+function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   if(!attacker.alive || !defender.alive) return;
 
-  // Simple accuracy model:
-  const hitRoll = Math.random() < 0.80;
-  const dmg = hitRoll ? Phaser.Math.Between(0, attacker.weapon.maxHit) : 0;
+  const hitChance = Math.min(0.98, BASE_ACCURACY + accBonus);
+  const hitRoll = Math.random() < hitChance;
+  const raw = hitRoll ? Phaser.Math.Between(0, Math.round(attacker.weapon.maxHit * dmgMult)) : 0;
+  const dmg = Math.max(0, Math.floor(raw));
 
   swingFx(attacker, defender, dmg);
 
@@ -243,10 +285,8 @@ function doSwing(attacker, defender){
     defender.hp = Math.max(0, defender.hp - dmg);
     updateHpUI(defender);
 
-    // If still alive and at/below threshold, try to auto-eat immediately
-    if(defender.hp>0 && defender.hp<=EAT_AT_HP){
-      tryAutoEat(defender);
-    }
+    // Auto-eat opportunity
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP){ tryAutoEat(defender); }
 
     if(defender.hp<=0){
       defender.alive=false;
@@ -255,11 +295,74 @@ function doSwing(attacker, defender){
       stopDuel();
     }
   }else{
-    // Miss splash; opportunistic eat if already very low
-    if(defender.hp>0 && defender.hp<=EAT_AT_HP){
-      tryAutoEat(defender);
-    }
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP){ tryAutoEat(defender); }
   }
+}
+
+/* --------- Specials --------- */
+// Player button -> fire special if enough energy
+function trySpecial(attacker, defender){
+  if(!duelActive || !attacker.alive || !defender.alive) return;
+  const cost = attacker.weapon.specCost ?? 50;
+  if(attacker.spec < cost){
+    ui.status.setText('Not enough special energy');
+    return;
+  }
+  performSpecial(attacker, defender);
+}
+
+function performSpecial(a, d){
+  const id = a.weapon.id;
+  const cost = a.weapon.specCost ?? 50;
+  if(a.spec < cost) return;
+
+  if(id==='dagger'){  // Dragon Dagger style: 2 quick stabs, high accuracy, modest boost
+    a.spec -= cost;
+    updateSpecUI(a);
+
+    // Two hits same tick
+    doSwing(a, d, /*accBonus*/0.15, /*dmgMult*/1.15);
+    doSwing(a, d, /*accBonus*/0.15, /*dmgMult*/1.15);
+
+    a.nextAttack = a.weapon.speedTicks + 1; // slight recovery
+    ui.status.setText(`${a.name} uses Special: Double Stab!`);
+
+  }else if(id==='sword'){ // Dragon Claws style: 4 hits, descending weights
+    a.spec -= cost;
+    updateSpecUI(a);
+
+    const m = a.weapon.maxHit;
+    const parts = [0.40, 0.30, 0.20, 0.10]; // percentages of max for upper bounds
+    parts.forEach(pct=>{
+      const mult = pct * 1.8; // slight overall boost
+      doSwing(a, d, /*accBonus*/0.10, /*dmgMult*/mult);
+    });
+
+    a.nextAttack = a.weapon.speedTicks + 2;
+    ui.status.setText(`${a.name} unleashes Special: Flurry!`);
+
+  }else if(id==='axe'){ // AGS style: one heavy accurate hit
+    a.spec -= cost;
+    updateSpecUI(a);
+
+    doSwing(a, d, /*accBonus*/0.15, /*dmgMult*/1.5); // up to 150% of max
+    a.nextAttack = a.weapon.speedTicks + 2;
+    ui.status.setText(`${a.name} uses Special: Judgement!`);
+  }
+}
+
+// Enemy AI choice to special
+function tryEnemySpecial(e, p){
+  const cost = e.weapon.specCost ?? 50;
+  if(e.spec < cost) return false;
+
+  // Simple policy: more likely to spec if player is low, otherwise 25% chance
+  const want = (p.hp <= 45) ? 0.8 : 0.25;
+  if(Math.random() < want){
+    performSpecial(e, p);
+    return true;
+  }
+  return false;
 }
 
 /* --------- Eating logic --------- */
@@ -287,6 +390,13 @@ function tryAutoEat(f){
   }
 }
 
+/* --------- Spec helpers --------- */
+function regenSpec(f){
+  if(!f.alive) return;
+  f.spec = Math.min(SPEC_MAX, f.spec + SPEC_REGEN_PER_TICK);
+  updateSpecUI(f);
+}
+
 /* --------- Visual FX --------- */
 function swingFx(a, d, dmg){
   const ang=Phaser.Math.Angle.Between(a.x, a.y, d.x, d.y);
@@ -307,18 +417,17 @@ function swingFx(a, d, dmg){
 }
 
 function eatFx(f, healed){
-  // small green pulse + +heal text
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
   s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
-  const t=s.add.text(f.x, f.y-48, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
-  s.tweens.add({targets:t, y:f.y-64, alpha:0, duration:700, onComplete:()=>t.destroy()});
+  const t=s.add.text(f.x, f.y-64, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
+  s.tweens.add({targets:t, y:f.y-80, alpha:0, duration:700, onComplete:()=>t.destroy()});
 }
 
 function deathFx(f){
   s.tweens.add({targets:f.body, scale:1.35, alpha:0, duration:320});
 }
 
-/* --------- HP/UI helpers --------- */
+/* --------- UI helpers --------- */
 function updateHpUI(f){
   const barW=110;
   const r = Math.max(0, f.hp/f.maxHp);
@@ -335,10 +444,18 @@ function updateFoodUI(f){
   f.foodBg.fillColor = f.food>0 ? 0x1f2a3a : 0x3a2222;
 }
 
+function updateSpecUI(f){
+  const w = 110;
+  const r = Math.max(0, Math.min(1, f.spec/SPEC_MAX));
+  f.specFill.width = w * r;
+  f.specFill.fillColor = r>0.5 ? 0x6fd1ff : (r>0.25 ? 0xf1c14e : 0xe86a6a);
+  f.specTxt.setText(`Spec ${Math.round(f.spec)}%`);
+}
+
 /* --------- Weapons --------- */
 function setWeapon(fighter, weapon, msg, quiet=false){
   fighter.weapon = weapon;
   if(!quiet){
-    ui.status.setText(`${msg} (Speed: ${weapon.speedTicks}t, MaxHit: ${weapon.maxHit})`);
+    ui.status.setText(`${msg} (Speed: ${weapon.speedTicks}t, MaxHit: ${weapon.maxHit}, Spec ${weapon.specCost}%)`);
   }
 }
