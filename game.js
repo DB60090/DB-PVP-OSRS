@@ -3,6 +3,7 @@
    - Main weapons: D Scim / Whip / MSB / Dragon Knives / Fire Surge / Ice Blitz
    - Specs: DDS, Claws, AGS, Dark Bow, Volatile Staff
    - Specials arm first, fire on next attack tick; have cooldowns
+   - SAFE KO: idempotent end-of-duel guards to prevent crash at death
 */
 
 const W=420, H=640;
@@ -53,7 +54,7 @@ const EAT_AT_HP=50, FOOD_HEAL=20, FOOD_START=10, EAT_COST_TK=1;
 const SPEC_MAX=100, SPEC_REGEN_PER_TICK=2;
 
 // ---- Runtime ----
-let s, ui={}, tickEvent=null, tickCount=0, duelActive=false;
+let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false;
 
 function preload(){}
 
@@ -159,7 +160,7 @@ function refreshLoadoutTexts(){
 /* ---------------- Special arming (player) ---------------- */
 function togglePlayerSpec(){
   const p=s.player;
-  if(!duelActive || !p.alive) return;
+  if(!duelActive || !p.alive || duelEnded) return;
   if(p.wantSpec){ p.wantSpec=false; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
   if(!canSpec(p)){ ui.status.setText('Not ready (energy/cooldown)'); return; }
   p.wantSpec=true; ui.specBtn.setActiveState(true);
@@ -171,6 +172,7 @@ function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
 function startDuel(){
   if(duelActive) return;
   duelActive=true;
+  duelEnded=false;
   ui.status.setText('Fight!');
   ui.startBtn.setVisible(false);
   ui.rematchBtn.setVisible(false);
@@ -183,11 +185,11 @@ function startDuel(){
 }
 
 function onTick(){
-  if(!duelActive) return;
+  if(!duelActive || duelEnded) return;
   tickCount++;
 
   const p=s.player, e=s.enemy;
-  if(!p.alive || !e.alive){ stopDuel(); return; }
+  if(!p.alive || !e.alive){ safeEnd(p.alive ? p : e); return; }
 
   // regen & cooldowns
   regenSpec(p); regenSpec(e);
@@ -199,29 +201,42 @@ function onTick(){
   // Player tick
   if(p.nextAttack<=0 && p.alive){
     const fired = tryFireSpecialOnTick(p, e);
-    if(!fired){
+    if(!fired && !duelEnded){
       doSwing(p, e);
-      p.nextAttack = p.mainWeapon.speedTicks;
+      if(!duelEnded) p.nextAttack = p.mainWeapon.speedTicks;
     }
   }
 
-  // Enemy tick: AI arms before tick, fires only on tick
-  if(e.nextAttack<=0 && e.alive){
+  // Enemy tick
+  if(e.nextAttack<=0 && e.alive && !duelEnded){
     if(!e.wantSpec && canSpec(e)){
       const want = (p.hp <= 45) ? 0.7 : 0.25;
       if(Math.random()<want) e.wantSpec = true;
     }
     const fired = tryFireSpecialOnTick(e, p);
-    if(!fired){
+    if(!fired && !duelEnded){
       doSwing(e, p);
-      e.nextAttack = e.mainWeapon.speedTicks;
+      if(!duelEnded) e.nextAttack = e.mainWeapon.speedTicks;
     }
   }
 }
 
 function stopDuel(){
+  // Idempotent: safe to call many times
+  if(duelEnded) return;
+  duelEnded=true;
   duelActive=false;
-  if(tickEvent){ tickEvent.remove(false); tickEvent=null; }
+  if(tickEvent){ try{ tickEvent.remove(false); }catch{} tickEvent=null; }
+  ui.rematchBtn.setVisible(true);
+}
+
+function safeEnd(winner){
+  if(duelEnded) return;
+  duelEnded=true;
+  duelActive=false;
+  if(tickEvent){ try{ tickEvent.remove(false); }catch{} tickEvent=null; }
+  const name = winner?.name || 'Winner';
+  ui.status.setText(`${name} wins!`);
   ui.rematchBtn.setVisible(true);
 }
 
@@ -229,6 +244,7 @@ function rematch(){
   resetFighter(s.player);
   resetFighter(s.enemy);
   rollBothLoadouts(); refreshLoadoutTexts();
+  duelEnded=false;
   ui.status.setText('Reroll loadouts, then Start Duel');
   ui.startBtn.setVisible(true);
   ui.rematchBtn.setVisible(false);
@@ -246,6 +262,7 @@ function resetFighter(f){
 
 /* ---------------- Tick-gated specials ---------------- */
 function tryFireSpecialOnTick(a, d){
+  if(duelEnded) return false;
   if(!a.wantSpec || !canSpec(a)) return false;
   performSpecial(a, d);
   a.wantSpec=false; if(a===s.player) ui.specBtn.setActiveState(false);
@@ -253,15 +270,16 @@ function tryFireSpecialOnTick(a, d){
 }
 
 function performSpecial(a, d){
+  if(duelEnded || !a.alive || !d.alive) return;
   const spec=a.specWeapon.type, cost=a.specWeapon.cost;
   if(a.spec<cost) return;
 
   // Spend spec
   a.spec -= cost; updateSpecUI(a);
 
-  // NOTE: Specials ignore style triangles now (no armour); we just apply tuned acc/dmg
+  // No armour triangle in this build; just tuned acc/dmg
   if(spec==='dds'){ // 2 fast accurate pokes
-    doSwing(a, d, 0.15, 1.15);
+    doSwing(a, d, 0.15, 1.15); if(duelEnded) return;
     doSwing(a, d, 0.15, 1.15);
     a.nextAttack = a.mainWeapon.speedTicks + 1;
     a.specCooldown = 3;
@@ -269,7 +287,7 @@ function performSpecial(a, d){
 
   }else if(spec==='claws'){ // 4 descending
     const parts=[0.40,0.30,0.20,0.10];
-    parts.forEach(pct=> doSwing(a, d, 0.10, pct*1.8));
+    for(const pct of parts){ doSwing(a, d, 0.10, pct*1.8); if(duelEnded) break; }
     a.nextAttack = a.mainWeapon.speedTicks + 2;
     a.specCooldown = 4;
     ui.status.setText(`${a.name} unleashes Claw Flurry!`);
@@ -280,8 +298,8 @@ function performSpecial(a, d){
     a.specCooldown = 4;
     ui.status.setText(`${a.name} smashes with AGS!`);
 
-  }else if(spec==='dbow'){ // Dark Bow: 2 heavy arrows (higher min feel via multiplier)
-    doSwing(a, d, 0.10, 1.25);
+  }else if(spec==='dbow'){ // Dark Bow: 2 heavy arrows
+    doSwing(a, d, 0.10, 1.25); if(duelEnded) return;
     doSwing(a, d, 0.10, 1.25);
     a.nextAttack = a.mainWeapon.speedTicks + 2;
     a.specCooldown = 4;
@@ -299,7 +317,7 @@ function performSpecial(a, d){
 
 /* ---------------- Autos / damage ---------------- */
 function doSwing(attacker, defender, accBonus=0, dmgMult=1){
-  if(!attacker.alive || !defender.alive) return;
+  if(duelEnded || !attacker.alive || !defender.alive) return;
 
   const max = Math.round(attacker.mainWeapon.maxHit * dmgMult);
   const hitChance = Math.min(0.98, Math.max(0, BASE_ACCURACY + accBonus));
@@ -311,12 +329,14 @@ function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   if(dmg>0){
     defender.hp = Math.max(0, defender.hp - dmg);
     updateHpUI(defender);
+
     if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+
     if(defender.hp<=0){
       defender.alive=false;
       deathFx(defender);
-      ui.status.setText(`${attacker.name} wins!`);
-      stopDuel();
+      safeEnd(attacker);
+      return;
     }
   }else{
     if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
@@ -325,6 +345,7 @@ function doSwing(attacker, defender, accBonus=0, dmgMult=1){
 
 /* ---------------- Eating / regen ---------------- */
 function tryAutoEat(f){
+  if(duelEnded) return;
   if(f.food<=0) return;
   if(f.lastEatTick===tickCount) return;
   f.food--; f.lastEatTick=tickCount;
@@ -336,12 +357,19 @@ function tryAutoEat(f){
   f.nextAttack += EAT_COST_TK;
 
   updateHpUI(f); updateFoodUI(f); eatFx(f, healed);
-  ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
+  if(!duelEnded){
+    ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
+  }
 }
-function regenSpec(f){ if(!f.alive) return; f.spec = Math.min(SPEC_MAX, f.spec + SPEC_REGEN_PER_TICK); updateSpecUI(f); }
+function regenSpec(f){
+  if(!f.alive || duelEnded) return;
+  f.spec = Math.min(SPEC_MAX, f.spec + SPEC_REGEN_PER_TICK);
+  updateSpecUI(f);
+}
 
 /* ---------------- FX ---------------- */
 function swingFx(a, d, dmg){
+  if(duelEnded) return;
   const ang=Phaser.Math.Angle.Between(a.x, a.y, d.x, d.y);
   const dist=Phaser.Math.Distance.Between(a.x,a.y,d.x,d.y)-18;
   const swipe=s.add.rectangle(a.x,a.y,Math.max(8,dist),6,0x99ddff).setStrokeStyle(2,0xcfeaff)
@@ -359,6 +387,7 @@ function swingFx(a, d, dmg){
   s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
 }
 function eatFx(f, healed){
+  if(duelEnded) return;
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
   s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
   const t=s.add.text(f.x, f.y-64, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
