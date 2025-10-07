@@ -1,10 +1,10 @@
-/* PvP (offline) — iPhone + Food + Proper Tick Specials + Random Loadouts
+/* PvP (offline) — iPhone + Food + Proper Tick Specials + Random Loadouts + Loot (Local Save)
    - Loadouts locked during duel (reroll disabled mid-fight)
-   - Tick-true specials (arm -> fire on next attack tick)
-   - Spec cooldown prevents spamming
-   - Random Main weapon (autos) + Spec weapon (special move)
-   - Auto-eat at <= 50 HP, 10 food, +20 heal, eating costs 1 tick
-*/ 
+   - Tick-true specials (arm -> fire on next attack tick) + cooldown
+   - Random Main (autos) + Spec (special move)
+   - Auto-eat at <= 50 HP, 10 food, +20 heal, costs 1 tick
+   - NEW: Loot on kill (take bot’s Main/Spec), save to localStorage, optionally auto-equip next round
+*/
 
 const W=420, H=640;
 const config={
@@ -33,6 +33,7 @@ const MAIN_WEAPONS = [
   {id:'fsurge',name:'Fire Surge',      speedTicks:5, maxHit:48},
   {id:'iblitz',name:'Ice Blitz',       speedTicks:5, maxHit:44},
 ];
+const MAIN_MAP = Object.fromEntries(MAIN_WEAPONS.map(w=>[w.id,w]));
 
 // ---- Spec weapons (which special move) ----
 const SPEC_WEAPONS = [
@@ -45,6 +46,7 @@ const SPEC_WEAPONS = [
   // Magic
   {id:'vstaff', name:'Volatile Staff', cost:55, type:'vstaff'}, // massive single hit
 ];
+const SPEC_MAP = Object.fromEntries(SPEC_WEAPONS.map(w=>[w.id,w]));
 
 // ---- Food config ----
 const EAT_AT_HP   = 50;
@@ -58,6 +60,20 @@ const SPEC_REGEN_PER_TICK = 2;
 
 // ---- Runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false;
+
+// ---- Loot/inventory (local save) ----
+let inventory = loadInventory();  // { mains: string[], specs: string[] }
+let nextEquipOverride = { mainId:null, specId:null }; // set from loot panel
+function loadInventory(){
+  try{
+    const raw = localStorage.getItem('pvp_inventory');
+    if(raw){ const obj=JSON.parse(raw); return {mains:obj.mains||[], specs:obj.specs||[]}; }
+  }catch(e){}
+  return { mains:[], specs:[] };
+}
+function saveInventory(){
+  try{ localStorage.setItem('pvp_inventory', JSON.stringify(inventory)); }catch(e){}
+}
 
 function preload(){}
 
@@ -79,7 +95,8 @@ function create(){
   p.loadoutTxt = s.add.text(p.x, p.y-60, '', {font:'10px Arial', color:'#bfe0ff'}).setOrigin(0.5);
   e.loadoutTxt = s.add.text(e.x, e.y-60, '', {font:'10px Arial', color:'#ffd6d6'}).setOrigin(0.5);
 
-  ui.status = s.add.text(W/2, H-148, 'Reroll loadouts, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
+  ui.status = s.add.text(W/2, H-162, 'Reroll loadouts, then Start Duel', {font:'14px Arial', color:'#9fdcff'}).setOrigin(0.5);
+  ui.invTxt = s.add.text(W/2, H-144, invLabel(), {font:'11px Arial', color:'#a8c8ff'}).setOrigin(0.5);
 
   ui.rerollBtn = button(W/2-100, H-110, 132, 36, 'Reroll Loadouts', ()=>{
     if(duelActive) return; // 🔒 disable during fight
@@ -92,6 +109,9 @@ function create(){
   ui.startBtn  = button(W/2+60, H-74, 170, 44, 'Start Duel', ()=>startDuel());
   ui.rematchBtn= button(W/2+60, H-74, 170, 44, 'Rematch', ()=>rematch());
   ui.rematchBtn.setVisible(false);
+
+  // Loot Panel (hidden until a kill)
+  buildLootPanel();
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
@@ -154,16 +174,28 @@ function smallButton(x,y,w,h,label,onClick){
 /* ---------------- Loadouts ---------------- */
 function pickRandom(arr){ return arr[(Math.random()*arr.length)|0]; }
 function rollLoadout(f){
-  f.mainWeapon = pickRandom(MAIN_WEAPONS);
-  f.specWeapon = pickRandom(SPEC_WEAPONS);
+  // If user set overrides from loot, use them once; otherwise random
+  if(f===s.player && nextEquipOverride.mainId && MAIN_MAP[nextEquipOverride.mainId]){
+    f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
+  } else {
+    f.mainWeapon = pickRandom(MAIN_WEAPONS);
+  }
+  if(f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId]){
+    f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
+  } else {
+    f.specWeapon = pickRandom(SPEC_WEAPONS);
+  }
 }
+function clearNextOverrides(){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function refreshLoadoutTexts(){
   const p=s.player, e=s.enemy;
   p.loadoutTxt.setText(`Main: ${p.mainWeapon.name}  |  Spec: ${p.specWeapon.name}`);
   e.loadoutTxt.setText(`Main: ${e.mainWeapon.name}  |  Spec: ${e.specWeapon.name}`);
   ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
+  ui.invTxt.setText(invLabel());
 }
+function invLabel(){ return `Loot: Mains ${inventory.mains.length} | Specs ${inventory.specs.length}`; }
 
 /* ---------------- Combat control ---------------- */
 function startDuel(){
@@ -215,26 +247,96 @@ function stopDuel(){
   ui.rematchBtn.setVisible(true);
 }
 
+/* ---------------- Loot Panel ---------------- */
+let lootUI = null;
+function buildLootPanel(){
+  const cx=W/2, cy=H*0.34;
+  const cont = s.add.container(cx, cy);
+  cont.setDepth(10);
+  const bg = s.add.rectangle(0,0, W*0.84, 170, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title = s.add.text(0,-68,'Loot Found',{font:'16px Arial',color:'#ffffff'}).setOrigin(0.5);
+
+  const mainTxt = s.add.text(-150,-36,'Main: —',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
+  const specTxt = s.add.text(-150,-12,'Spec: —',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
+
+  const takeMainBtn = button(-60, 32, 110, 30, 'Take Main', ()=>loot_takeMain());
+  const takeSpecBtn = button( 60, 32, 110, 30, 'Take Spec', ()=>loot_takeSpec());
+
+  const equipNextMain = s.add.text(-150, 56, '☐ Equip main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  const equipNextSpec = s.add.text(-150, 76, '☐ Equip spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+
+  const closeBtn = button(140, 70, 80, 28, 'Close', ()=>loot_hide());
+
+  cont.add([bg,title,mainTxt,specTxt,takeMainBtn,takeSpecBtn,equipNextMain,equipNextSpec,closeBtn]);
+  cont.setVisible(false);
+
+  lootUI = {
+    cont, mainTxt, specTxt,
+    equipNextMain, equipNextSpec,
+    currentMainId:null, currentSpecId:null,
+    equipMain:false, equipSpec:false
+  };
+
+  equipNextMain.on('pointerdown',()=>{
+    lootUI.equipMain=!lootUI.equipMain;
+    equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round');
+  });
+  equipNextSpec.on('pointerdown',()=>{
+    lootUI.equipSpec=!lootUI.equipSpec;
+    equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round');
+  });
+
+  // handlers need to exist in scope
+  function loot_takeMain(){
+    if(!lootUI.currentMainId) return;
+    if(!inventory.mains.includes(lootUI.currentMainId)){
+      inventory.mains.push(lootUI.currentMainId); saveInventory(); ui.invTxt.setText(invLabel());
+    }
+  }
+  function loot_takeSpec(){
+    if(!lootUI.currentSpecId) return;
+    if(!inventory.specs.includes(lootUI.currentSpecId)){
+      inventory.specs.push(lootUI.currentSpecId); saveInventory(); ui.invTxt.setText(invLabel());
+    }
+  }
+}
+
+function loot_show(mainId, specId){
+  if(!lootUI) return;
+  lootUI.currentMainId = mainId;
+  lootUI.currentSpecId = specId;
+  lootUI.equipMain=false; lootUI.equipSpec=false;
+  lootUI.equipNextMain.setText('☐ Equip main next round');
+  lootUI.equipNextSpec.setText('☐ Equip spec next round');
+
+  const mainName = MAIN_MAP[mainId]?.name || '—';
+  const specName = SPEC_MAP[specId]?.name || '—';
+  lootUI.mainTxt.setText(`Main: ${mainName}`);
+  lootUI.specTxt.setText(`Spec: ${specName}`);
+
+  lootUI.cont.setVisible(true);
+}
+function loot_hide(){
+  lootUI.cont.setVisible(false);
+  // apply equip-next choices
+  if(lootUI.equipMain) nextEquipOverride.mainId = lootUI.currentMainId;
+  if(lootUI.equipSpec) nextEquipOverride.specId = lootUI.currentSpecId;
+}
+
+/* ---------------- Rematch ---------------- */
 function rematch(){
   resetFighter(s.player);
   resetFighter(s.enemy);
-  rollBothLoadouts(); refreshLoadoutTexts();
+  rollBothLoadouts();
+  refreshLoadoutTexts();
+  clearNextOverrides(); // use override once; comment this line if you want it to persist until manually changed
   ui.status.setText('Reroll loadouts, then Start Duel');
   ui.startBtn.setVisible(true);
   ui.rematchBtn.setVisible(false);
   ui.specBtn.setActiveState(false);
 }
 
-function resetFighter(f){
-  f.hp=f.maxHp; f.alive=true;
-  f.food=FOOD_START; f.lastEatTick=-999;
-  f.spec=SPEC_MAX; f.wantSpec=false; f.specCooldown=0; f.lastSpecTick=-999;
-  f.nextAttack=0;
-  f.body.setAlpha(1).setScale(1);
-  updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
-}
-
-/* ---------------- Specials ---------------- */
+/* ---------------- Specials: ARM -> FIRE ON TICK ---------------- */
 function togglePlayerSpec(){
   const p=s.player;
   if(!duelActive || !p.alive) return;
@@ -243,7 +345,12 @@ function togglePlayerSpec(){
   p.wantSpec=true; ui.specBtn.setActiveState(true);
   ui.status.setText('Special armed — will fire on your next tick');
 }
-function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
+
+function canSpec(f){
+  const cost=f.specWeapon.cost;
+  return f.spec>=cost && f.specCooldown<=0;
+}
+
 function tryFireSpecialOnTick(a, d){
   if(!a.wantSpec || !canSpec(a)) return false;
   performSpecial(a, d);
@@ -251,9 +358,12 @@ function tryFireSpecialOnTick(a, d){
   if(a===s.player) ui.specBtn.setActiveState(false);
   return true;
 }
+
 function performSpecial(a, d){
-  const spec=a.specWeapon.type, cost=a.specWeapon.cost;
+  const spec=a.specWeapon.type;
+  const cost=a.specWeapon.cost;
   if(a.spec<cost) return;
+
   a.spec -= cost; updateSpecUI(a);
 
   if(spec==='dds'){ doSwing(a,d,0.15,1.15); doSwing(a,d,0.15,1.15); a.nextAttack+=1; a.specCooldown=3; ui.status.setText(`${a.name} uses Double Stab!`); }
@@ -264,58 +374,105 @@ function performSpecial(a, d){
   a.lastSpecTick = tickCount;
 }
 
-/* ---------------- Damage & FX ---------------- */
+/* ---------------- Autos / Damage ---------------- */
 function doSwing(attacker, defender, accBonus=0, dmgMult=1){
   if(!attacker.alive || !defender.alive) return;
-  const max=Math.round(attacker.mainWeapon.maxHit*dmgMult);
-  const hitChance=Math.min(0.98,BASE_ACCURACY+accBonus);
-  const hit=Math.random()<hitChance;
-  const dmg=hit?Phaser.Math.Between(0,max):0;
-  swingFx(attacker,defender,dmg);
+  const max = Math.round(attacker.mainWeapon.maxHit * dmgMult);
+  const hitChance = Math.min(0.98, BASE_ACCURACY + accBonus);
+  const hit = Math.random() < hitChance;
+  const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
+
+  swingFx(attacker, defender, dmg);
+
   if(dmg>0){
-    defender.hp=Math.max(0,defender.hp-dmg);
+    defender.hp = Math.max(0, defender.hp - dmg);
     updateHpUI(defender);
+
+    // Auto-eat window
     if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
-    if(defender.hp<=0){ defender.alive=false; deathFx(defender); ui.status.setText(`${attacker.name} wins!`); stopDuel(); }
-  }else{ if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender); }
+
+    if(defender.hp<=0){
+      defender.alive=false;
+      deathFx(defender);
+      ui.status.setText(`${attacker.name} wins!`);
+      stopDuel();
+
+      // Show loot (bot drops its gear)
+      if(attacker===s.player){
+        loot_show(s.enemy.mainWeapon.id, s.enemy.specWeapon.id);
+      }else{
+        // If bot wins, optionally the player drops nothing; feel free to change
+        // loot_show(s.player.mainWeapon.id, s.player.specWeapon.id); // enable if you want the bot to loot (for PvE not needed)
+      }
+    }
+  }else{
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+  }
 }
+
+/* ---------------- Eating ---------------- */
 function tryAutoEat(f){
   if(f.food<=0) return;
   if(f.lastEatTick===tickCount) return;
   f.food--; f.lastEatTick=tickCount;
+
   const before=f.hp;
-  f.hp=Math.min(f.maxHp,f.hp+FOOD_HEAL);
-  const healed=f.hp-before;
-  f.nextAttack+=EAT_COST_TK;
-  updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
+  f.hp = Math.min(f.maxHp, f.hp + FOOD_HEAL);
+  const healed = f.hp - before;
+
+  f.nextAttack += EAT_COST_TK; // costs a tick
+
+  updateHpUI(f); updateFoodUI(f); eatFx(f, healed);
   ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
 }
-function regenSpec(f){ if(!f.alive)return; f.spec=Math.min(SPEC_MAX,f.spec+SPEC_REGEN_PER_TICK); updateSpecUI(f); }
+
+/* ---------------- Per-tick regen ---------------- */
+function regenSpec(f){
+  if(!f.alive) return;
+  f.spec = Math.min(SPEC_MAX, f.spec + SPEC_REGEN_PER_TICK);
+  updateSpecUI(f);
+}
 
 /* ---------------- FX ---------------- */
-function swingFx(a,d,dmg){
-  const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y);
+function swingFx(a, d, dmg){
+  const ang=Phaser.Math.Angle.Between(a.x, a.y, d.x, d.y);
   const dist=Phaser.Math.Distance.Between(a.x,a.y,d.x,d.y)-18;
   const swipe=s.add.rectangle(a.x,a.y,Math.max(8,dist),6,0x99ddff).setStrokeStyle(2,0xcfeaff)
     .setOrigin(0,0.5).setRotation(ang).setAlpha(0).setScale(0,1);
   s.tweens.add({targets:swipe,alpha:.95,scaleX:1,duration:120,ease:'quad.out',
     onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})
   });
-  s.tweens.add({targets:a.body,scale:1.15,yoyo:true,duration:120});
-  const flash=s.add.circle(d.x,d.y,8,dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
-  s.tweens.add({targets:flash,radius:20,alpha:0,duration:220,onComplete:()=>flash.destroy()});
-  const txt=s.add.text(d.x,d.y-30,dmg>0?`-${dmg}`:'0',{font:'14px Arial',color:'#ffffff'}).setOrigin(0.5);
-  s.tweens.add({targets:txt,y:d.y-46,alpha:0,duration:700,onComplete:()=>txt.destroy()});
+
+  s.tweens.add({targets:a.body, scale:1.15, yoyo:true, duration:120});
+
+  const flash=s.add.circle(d.x,d.y,8, dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
+  s.tweens.add({targets:flash, radius:20, alpha:0, duration:220, onComplete:()=>flash.destroy()});
+
+  const txt = s.add.text(d.x, d.y-30, dmg>0?`-${dmg}`:'0', {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
+  s.tweens.add({targets:txt, y:d.y-46, alpha:0, duration:700, onComplete:()=>txt.destroy()});
 }
-function eatFx(f,healed){
+function eatFx(f, healed){
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
-  s.tweens.add({targets:ring,radius:24,alpha:0,duration:260,onComplete:()=>ring.destroy()});
-  const t=s.add.text(f.x,f.y-64,`+${healed}`,{font:'13px Arial',color:'#a9ffb6'}).setOrigin(0.5);
-  s.tweens.add({targets:t,y:f.y-80,alpha:0,duration:700,onComplete:()=>t.destroy()});
+  s.tweens.add({targets:ring, radius:24, alpha:0, duration:260, onComplete:()=>ring.destroy()});
+  const t=s.add.text(f.x, f.y-64, `+${healed}`, {font:'13px Arial', color:'#a9ffb6'}).setOrigin(0.5);
+  s.tweens.add({targets:t, y:f.y-80, alpha:0, duration:700, onComplete:()=>t.destroy()});
 }
-function deathFx(f){ s.tweens.add({targets:f.body,scale:1.35,alpha:0,duration:320}); }
 
 /* ---------------- UI updates ---------------- */
-function updateHpUI(f){ const barW=110,r=Math.max(0,f.hp/f.maxHp); f.hpFill.width=barW*r; f.hpFill.fillColor=r>0.5?0x4dd06d:(r>0.2?0xf1c14e:0xe86a6a); f.hpText.setText(`${f.hp}/${f.maxHp}`); }
-function updateFoodUI(f){ f.foodTxt.setText(`Food: ${f.food}`); f.foodTxt.setColor(f.food>0?'#cfe8ff':'#ffaaaa'); f.foodBg.fillColor=f.food>0?0x1f2a3a:0x3a2222; }
-function updateSpecUI(f){ const w=110,r=Math.max(0,Math.min(1,f.spec/SPEC_MAX)); f.specFill.width=w*r; f.specFill.fillColor=r>0.5?0x6fd1ff:(r>0.25?0xf1c14e:0xe86a6a); f.specTxt.setText(`Spec ${Math.round(f.spec)}%`); }
+function updateHpUI(f){
+  const barW=110, r = Math.max(0, f.hp/f.maxHp);
+  f.hpFill.width = barW * r;
+  f.hpFill.fillColor = r>0.5 ? 0x4dd06d : (r>0.2 ? 0xf1c14e : 0xe86a6a);
+  f.hpText.setText(`${f.hp}/${f.maxHp}`);
+}
+function updateFoodUI(f){
+  f.foodTxt.setText(`Food: ${f.food}`);
+  f.foodTxt.setColor(f.food>0 ? '#cfe8ff' : '#ffaaaa');
+  f.foodBg.fillColor = f.food>0 ? 0x1f2a3a : 0x3a2222;
+}
+function updateSpecUI(f){
+  const w = 110, r = Math.max(0, Math.min(1, f.spec/SPEC_MAX));
+  f.specFill.width = w * r;
+  f.specFill.fillColor = r>0.5 ? 0x6fd1ff : (r>0.25 ? 0xf1c14e : 0xe86a6a);
+  f.specTxt.setText(`Spec ${Math.round(f.spec)}%`);
+}
