@@ -1,9 +1,11 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory + Armour
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory + Armour + OSRS hitsplats
    - KO-SAFE: lethal hits queue a finish; end handled on next tick; no KO tween by default
    - Specials: arm → fire on NEXT tick (never same-tick), explicit post-spec recovery
    - Loot modal with working buttons, localStorage save
    - Tap “Loot: Mains | Specs” to open Inventory modal; lock equip for next round
-   - NEW: Armour sets w/ offensive synergies + defensive counters, shown under loadout
+   - Armour sets: offensive style synergies + defensive counters; shown under loadout lines
+   - OSRS-style hitsplats: diamonds w/ tails; multihits show simultaneous splats; zeros shake
+   - “Updated:” stamp taken from game.js Last-Modified header (fallback to now)
 */
 
 const W=420, H=640;
@@ -13,6 +15,29 @@ const config={
   scene:{ preload, create }
 };
 new Phaser.Game(config);
+
+// ---- tiny util: set Updated: from game.js ----
+function setUpdatedStampFromGameJs(){
+  const el = document.getElementById('build');
+  if(!el) return;
+  const pad=n=>String(n).padStart(2,'0');
+  const fmt=(d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+  try{
+    const scripts=[...document.getElementsByTagName('script')];
+    const me=scripts.find(sc=>/game\.js(?:\?|$)/.test(sc.src));
+    const src=me?me.src:'./game.js';
+    fetch(src, {method:'HEAD', cache:'no-cache'})
+      .then(r=>{
+        const lm=r.headers.get('last-modified');
+        const when = lm ? new Date(lm) : new Date();
+        el.textContent=`Updated: ${fmt(when)}`;
+      })
+      .catch(()=>{ el.textContent=`Updated: ${fmt(new Date())}`; });
+  }catch(e){
+    el.textContent=`Updated: ${fmt(new Date())}`;
+  }
+}
 
 // ---- toggles ----
 const SHOW_LOOT = true;  // set false to disable loot popup entirely
@@ -48,12 +73,7 @@ const SPEC_WEAPONS=[
 const MAIN_MAP=Object.fromEntries(MAIN_WEAPONS.map(w=>[w.id,w]));
 const SPEC_MAP=Object.fromEntries(SPEC_WEAPONS.map(w=>[w.id,w]));
 
-/* ================= Armour =================
-   Each set has:
-   - affinity: style it boosts offensively ('melee'|'ranged'|'mage')
-   - off: accuracy & damage multipliers when USING its affinity style
-   - def: reduces incoming attacks per incoming style (applies to ATTACKER’s hit chance/max damage)
-*/
+/* ================= Armour ================= */
 const ARMOUR_SETS = [
   // Melee lines
   {id:'dragon_melee',  name:'Dragon',          affinity:'melee', off:{acc:+0.04, dmg:+0.06}, def:{melee:{acc:-0.03,dmg:-0.03}}},
@@ -71,6 +91,14 @@ const ARMOUR_SETS = [
   {id:'ancestral_m',   name:'Ancestral',       affinity:'mage',   off:{acc:+0.08, dmg:+0.12}, def:{mage:{acc:-0.05,dmg:-0.05}, ranged:{acc:-0.01,dmg:0}}},
 ];
 const ARMOUR_MAP = Object.fromEntries(ARMOUR_SETS.map(a=>[a.id,a]));
+
+// ---- style colors for splats ----
+const SPLAT_COLOR = {
+  melee: 0xff6a6a,   // red
+  ranged:0x7ed957,   // green
+  mage:  0x6fb9ff,   // blue
+  zero:  0x7fa7cc    // blue-grey for 0s
+};
 
 // ---- runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false, pendingKO=null;
@@ -93,7 +121,9 @@ function preload(){}
 function create(){
   s=this;
 
-  s.add.text(W/2,22,'RuneScape-Style PvP (Offline)',{font:'18px Arial',color:'#fff'}).setOrigin(0.5);
+  setUpdatedStampFromGameJs();
+
+  styleReadableText(s.add.text(W/2,22,'RuneScape-Style PvP (Offline)',{font:'18px Arial',color:'#fff'}).setOrigin(0.5));
   s.add.rectangle(W/2,H*0.52,W*0.72,2,0x2a3a55);
 
   const leftX=W*0.28,rightX=W*0.72,y=H*0.45;
@@ -101,29 +131,32 @@ function create(){
   const e=makeFighter({name:'Bot', x:rightX,y,color:0xff8888,outline:0x4b1b1b});
   s.player=p; s.enemy=e;
 
-  p.nameText=s.add.text(p.x,p.y-72,`${p.name}`,{font:'12px Arial',color:'#d6e8ff'}).setOrigin(0.5);
-  e.nameText=s.add.text(e.x,e.y-72,`${e.name}`,{font:'12px Arial',color:'#ffd6d6'}).setOrigin(0.5);
+  p.nameText=styleReadableText(s.add.text(p.x,p.y-86,`${p.name}`,{font:'12px Arial',color:'#d6e8ff'}).setOrigin(0.5));
+  e.nameText=styleReadableText(s.add.text(e.x,e.y-86,`${e.name}`,{font:'12px Arial',color:'#ffd6d6'}).setOrigin(0.5));
 
-  p.loadoutTxt=s.add.text(p.x,p.y-60,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5);
-  e.loadoutTxt=s.add.text(e.x,e.y-60,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5);
+  p.loadoutTxt=styleReadableText(s.add.text(p.x,p.y-70,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5));
+  e.loadoutTxt=styleReadableText(s.add.text(e.x,e.y-70,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5));
 
-  // NEW: armour line just below loadout
-  p.armourTxt=s.add.text(p.x,p.y-48,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5);
-  e.armourTxt=s.add.text(e.x,e.y-48,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5);
+  p.armourTxt=styleReadableText(s.add.text(p.x,p.y-58,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5));
+  e.armourTxt=styleReadableText(s.add.text(e.x,e.y-58,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5));
 
-  ui.status=s.add.text(W/2,H-162,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5);
-  ui.invTxt=s.add.text(W/2,H-144,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5);
+  // bottom HUD slightly higher to clear Safari bar
+  const HUD_Y = H - 190;
+
+  ui.status=styleReadableText(s.add.text(W/2,HUD_Y,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5));
+  ui.invTxt=styleReadableText(s.add.text(W/2,HUD_Y+18,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5));
   ui.invTxt.setInteractive({useHandCursor:true});
   ui.invTxt.on('pointerdown', ()=>{ if(!duelActive) inv_show(); });
 
-  ui.rerollBtn=button(W/2-100,H-110,132,36,'Reroll Loadouts',()=>{
+  // Buttons: Start/Rematch centered; Reroll left, SPEC right
+  ui.rerollBtn=button(W/2-120,HUD_Y+52,144,38,'Reroll Loadouts',()=>{
     if(duelActive) return;
     rollBothLoadouts(); refreshLoadoutTexts();
     ui.status.setText('Loadouts rolled. Ready!');
   });
-  ui.specBtn   = smallButton(W/2+110,H-110,108,36,'SPEC',togglePlayerSpec);
-  ui.startBtn  = button(W/2+60,H-74,170,44,'Start Duel',()=>startDuel());
-  ui.rematchBtn= button(W/2+60,H-74,170,44,'Rematch',()=>rematch());
+  ui.specBtn   = smallButton(W/2+138,HUD_Y+52,116,38,'SPEC',togglePlayerSpec);
+  ui.startBtn  = button(W/2,HUD_Y+94,190,46,'Start Duel',()=>startDuel());
+  ui.rematchBtn= button(W/2,HUD_Y+94,190,46,'Rematch',()=>rematch());
   ui.rematchBtn.setVisible(false);
 
   buildLootPanel();
@@ -134,26 +167,31 @@ function create(){
 
 /* ================= Fighter & UI helpers ================= */
 
+function styleReadableText(txt){
+  txt.setShadow(0,1,'#000',4,true,true);
+  return txt;
+}
+
 function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
     food:FOOD_START,lastEatTick:-999,spec:SPEC_MAX,
     mainWeapon:null,specWeapon:null,nextAttack:0,
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
-    armour:null // NEW: armour slot
+    armour:null
   };
   f.body=s.add.circle(f.x,f.y,18,o.color).setStrokeStyle(3,o.outline);
 
   const barW=110;
   f.hpBg=s.add.rectangle(f.x,f.y-44,barW,10,0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
   f.hpFill=s.add.rectangle(f.x-barW/2,f.y-44,barW,8,0x4dd06d).setOrigin(0,0.5);
-  f.hpText=s.add.text(f.x,f.y-44,'',{font:'11px Arial',color:'#fff'}).setOrigin(0.5);
+  f.hpText=styleReadableText(s.add.text(f.x,f.y-44,'',{font:'11px Arial',color:'#fff'}).setOrigin(0.5));
 
   f.foodBg=s.add.rectangle(f.x,f.y-26,56,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
-  f.foodTxt=s.add.text(f.x,f.y-26,`Food: ${f.food}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5);
+  f.foodTxt=styleReadableText(s.add.text(f.x,f.y-26,`Food: ${f.food}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
-  f.specBg=s.add.rectangle(f.x,f.y-14,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.specBg=s.add.rectangle(f.x,f.y-14,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0,0.5);
   f.specFill=s.add.rectangle(f.x-55,f.y-14,110,4,0x6fd1ff).setOrigin(0,0.5);
-  f.specTxt=s.add.text(f.x,f.y+2,`Spec ${f.spec}%`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5);
+  f.specTxt=styleReadableText(s.add.text(f.x,f.y+2,`Spec ${f.spec}%`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
   return f;
@@ -161,17 +199,16 @@ function makeFighter(o){
 
 function button(x,y,w,h,label,onClick){
   const bg=s.add.rectangle(x,y,w,h,0x2a2f45).setStrokeStyle(2,0x151826).setOrigin(0.5).setInteractive({useHandCursor:true});
-  const txt=s.add.text(x,y,label,{font:'16px Arial',color:'#fff'}).setOrigin(0.5);
+  const txt=styleReadableText(s.add.text(x,y,label,{font:'16px Arial',color:'#fff'}).setOrigin(0.5));
   bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
   bg.on('pointerup',()=>bg.setScale(1));
   bg.on('pointerout',()=>bg.setScale(1));
   bg.setLabel=t=>txt.setText(t);
   return bg;
 }
-
 function smallButton(x,y,w,h,label,onClick){
   const bg=s.add.rectangle(x,y,w,h,0x23324a).setStrokeStyle(2,0x152033).setOrigin(0.5).setInteractive({useHandCursor:true});
-  const txt=s.add.text(x,y,label,{font:'13px Arial',color:'#d6e8ff'}).setOrigin(0.5);
+  const txt=styleReadableText(s.add.text(x,y,label,{font:'13px Arial',color:'#d6e8ff'}).setOrigin(0.5));
   bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
   bg.on('pointerup',()=>bg.setScale(1));
   bg.on('pointerout',()=>bg.setScale(1));
@@ -183,7 +220,7 @@ function smallButton(x,y,w,h,label,onClick){
 // Button that lives *inside a container* (used by popups)
 function panelButton(parent, x, y, w, h, label, onClick){
   const bg = s.add.rectangle(x, y, w, h, 0x2a2f45).setStrokeStyle(2, 0x151826).setOrigin(0.5);
-  const txt = s.add.text(x, y, label, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5);
+  const txt = styleReadableText(s.add.text(x, y, label, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5));
   bg.setInteractive({useHandCursor:true});
   bg.on('pointerdown', ()=>{ bg.setScale(0.98); onClick && onClick(); });
   bg.on('pointerup',   ()=>bg.setScale(1));
@@ -210,7 +247,7 @@ function rollLoadout(f){
     ? MAIN_MAP[nextEquipOverride.mainId] : pickRandom(MAIN_WEAPONS);
   f.specWeapon = (f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId])
     ? SPEC_MAP[nextEquipOverride.specId] : pickRandom(SPEC_WEAPONS);
-  rollArmourFor(f); // NEW
+  rollArmourFor(f);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function clearNextOverrides(){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
@@ -228,6 +265,8 @@ function invLabel(){ return `Loot: Mains ${inventory.mains.length} | Specs ${inv
 /* ================= Combat control ================= */
 
 function startDuel(){
+  const hintEl = document.getElementById('hint');
+  if(hintEl) hintEl.style.display='none';
   if(duelActive) return;
   duelActive=true; duelEnded=false; pendingKO=null;
   ui.status.setText('Fight!'); ui.startBtn.setVisible(false); ui.rematchBtn.setVisible(false);
@@ -340,6 +379,85 @@ function tryFireSpecialOnTick(a,d){
   if(a===s.player) ui.specBtn.setActiveState(false);
   return true;
 }
+
+/* ================= Attack math helpers (armour-aware) ================= */
+
+function offensiveBonus(attacker){
+  const a = attacker.armour, st = weaponStyle(attacker.mainWeapon);
+  if(!a) return {acc:+0, dmg:1};
+  if(a.affinity === st) return {acc:a.off.acc, dmg:1+a.off.dmg};
+  return {acc:+0, dmg:1};
+}
+function defensiveDebuff(defender, incomingStyle){
+  const a = defender.armour;
+  if(!a) return {acc:0, dmg:1};
+  const vs = (a.def && a.def[incomingStyle]) || null;
+  if(!vs) return {acc:0, dmg:1};
+  return {acc:vs.acc, dmg:1+vs.dmg}; // usually ≤1
+}
+function computeAttack(attacker, defender, accBonus=0, dmgMult=1){
+  const style = weaponStyle(attacker.mainWeapon);
+  const off = offensiveBonus(attacker);
+  const def = defensiveDebuff(defender, style);
+  const baseHit = BASE_ACCURACY + accBonus + off.acc + def.acc;
+  const hitChance = Math.min(0.98, Math.max(0.02, baseHit));
+  const effDmgMult = Math.max(0, dmgMult * off.dmg * def.dmg);
+  const max = Math.round(attacker.mainWeapon.maxHit * effDmgMult);
+  return {style, hitChance, max};
+}
+
+/* ================= Single + Multi swings (OSRS hitsplats) ================= */
+
+function doSwing(attacker,defender,accBonus=0,dmgMult=1){
+  if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
+  const {style, hitChance, max} = computeAttack(attacker,defender,accBonus,dmgMult);
+  const hit = Math.random()<hitChance;
+  const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
+
+  swipeFx(attacker,defender);
+  hitsplatFx(defender, [dmg], style); // single splat
+  applyDamage(defender, dmg);
+}
+
+function doMultiSwing(attacker,defender,parts){ // parts: [{accBonus, dmgMult}, ...]
+  if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
+
+  const damages=[];
+  let style = weaponStyle(attacker.mainWeapon);
+  for(const p of parts){
+    const calc = computeAttack(attacker,defender,p.accBonus||0,p.dmgMult||1);
+    const hit = Math.random()<calc.hitChance;
+    damages.push(hit ? Phaser.Math.Between(0, Math.max(0,calc.max)) : 0);
+    style = calc.style;
+  }
+
+  swipeFx(attacker,defender);
+  hitsplatFx(defender, damages, style);
+
+  const total = damages.reduce((a,b)=>a+b,0);
+  applyDamage(defender, total);
+}
+
+function applyDamage(defender, total){
+  const lethal = (total>=defender.hp);
+
+  if(total>0){
+    defender.hp = Math.max(0, defender.hp - total);
+    updateHpUI(defender);
+    if(lethal){
+      defender.alive=false;
+      if(KO_ANIM) deathFx(defender);
+      pendingKO={winner:(defender===s.player? s.enemy:s.player), loser:defender};
+      return;
+    }
+    if(defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+  }else{
+    if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+  }
+}
+
+/* ================= Specials (use multi-swing for multihits) ================= */
+
 function performSpecial(a,d){
   if(duelEnded||pendingKO||!a.alive||!d.alive) return;
   const spec=a.specWeapon.type, cost=a.specWeapon.cost;
@@ -347,19 +465,17 @@ function performSpecial(a,d){
   a.spec -= cost; updateSpecUI(a);
 
   if(spec==='dds'){
-    doSwing(a,d,0.15,1.15); if(pendingKO) return;
-    doSwing(a,d,0.15,1.15);
+    doMultiSwing(a,d,[{accBonus:0.15,dmgMult:1.15},{accBonus:0.15,dmgMult:1.15}]);
     a.nextAttack = a.mainWeapon.speedTicks + 1; a.specCooldown=3; ui.status.setText(`${a.name} uses Double Stab!`);
   }else if(spec==='claws'){
-    const parts=[0.4,0.3,0.2,0.1];
-    for(const pct of parts){ doSwing(a,d,0.1,pct*1.8); if(pendingKO) break; }
+    const parts=[0.4,0.3,0.2,0.1].map(p=>({accBonus:0.10,dmgMult:p*1.8}));
+    doMultiSwing(a,d,parts);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} unleashes Claw Flurry!`);
   }else if(spec==='ags'){
     doSwing(a,d,0.15,1.5);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} smashes with AGS!`);
   }else if(spec==='dbow'){
-    doSwing(a,d,0.1,1.25); if(pendingKO) return;
-    doSwing(a,d,0.1,1.25);
+    doMultiSwing(a,d,[{accBonus:0.10,dmgMult:1.25},{accBonus:0.10,dmgMult:1.25}]);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} fires Dark Bow!`);
   }else if(spec==='vstaff'){
     doSwing(a,d,0.2,1.8);
@@ -368,59 +484,7 @@ function performSpecial(a,d){
   a.lastSpecTick=tickCount;
 }
 
-/* ================= Damage / Eating / Regen ================= */
-
-function offensiveBonus(attacker){
-  const a = attacker.armour, st = weaponStyle(attacker.mainWeapon);
-  if(!a) return {acc:+0, dmg:1};
-  if(a.affinity === st) return {acc: a.off.acc, dmg: 1 + a.off.dmg};
-  return {acc:+0, dmg:1};
-}
-function defensiveDebuff(defender, incomingStyle){
-  const a = defender.armour;
-  if(!a) return {acc:0, dmg:1};
-  const vs = (a.def && a.def[incomingStyle]) || null;
-  if(!vs) return {acc:0, dmg:1};
-  return {acc: vs.acc, dmg: 1 + vs.dmg}; // dmg is a multiplier (≤1 when reducing)
-}
-
-function doSwing(attacker,defender,accBonus=0,dmgMult=1){
-  if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
-
-  const style = weaponStyle(attacker.mainWeapon);
-
-  // Armour effects
-  const off = offensiveBonus(attacker);                  // attacker’s offensive buff if armour matches weapon
-  const def = defensiveDebuff(defender, style);          // defender causes debuff to attacker based on incoming style
-
-  const baseHit = BASE_ACCURACY + accBonus + off.acc + def.acc; // def.acc usually negative
-  const hitChance = Math.min(0.98, Math.max(0.02, baseHit));    // clamp 2%..98%
-
-  const effDmgMult = Math.max(0, dmgMult * off.dmg * def.dmg);  // stack multipliers
-  const max=Math.round(attacker.mainWeapon.maxHit*effDmgMult);
-
-  const hit=Math.random()<hitChance;
-  const dmg=hit?Phaser.Math.Between(0,Math.max(0,max)):0;
-
-  const lethal=(dmg>=defender.hp);
-
-  swingFx(attacker,defender,dmg);
-
-  if(dmg>0){
-    defender.hp=Math.max(0,defender.hp-dmg);
-    updateHpUI(defender);
-
-    if(lethal){
-      defender.alive=false;
-      if(KO_ANIM) deathFx(defender);
-      pendingKO={winner:attacker,loser:defender};
-      return;
-    }
-    if(defender.hp<=EAT_AT_HP) tryAutoEat(defender);
-  }else{
-    if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
-  }
-}
+/* ================= Eating / Regen ================= */
 
 function tryAutoEat(f){
   if(duelEnded||pendingKO) return;
@@ -445,10 +509,10 @@ function buildLootPanel(){
   const cx=W/2, cy=H*0.34;
   const cont = s.add.container(cx, cy).setDepth(10);
   const bg   = s.add.rectangle(0,0, W*0.86, 190, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title= s.add.text(0,-72,'Loot Found',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-72,'Loot Found',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
 
-  const mainTxt = s.add.text(-160, -38, 'Main: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5);
-  const specTxt = s.add.text(-160, -14, 'Spec: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5);
+  const mainTxt = styleReadableText(s.add.text(-160, -38, 'Main: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
+  const specTxt = styleReadableText(s.add.text(-160, -14, 'Spec: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
 
   cont.add([bg,title,mainTxt,specTxt]);
 
@@ -456,8 +520,8 @@ function buildLootPanel(){
   panelButton(cont,  60, 30, 120, 32, 'Take Spec', ()=>loot_takeSpec());
   panelButton(cont, 150, 70,  86, 28, 'Close', ()=>loot_hide());
 
-  const equipNextMain = s.add.text(-160, 58, '☐ Equip main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
-  const equipNextSpec = s.add.text(-160, 78, '☐ Equip spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  const equipNextMain = styleReadableText(s.add.text(-160, 58, '☐ Equip main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const equipNextSpec = styleReadableText(s.add.text(-160, 78, '☐ Equip spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([equipNextMain, equipNextSpec]);
 
   cont.setVisible(false);
@@ -514,13 +578,13 @@ function buildInventoryPanel(){
   const cx=W/2, cy=H*0.36;
   const cont = s.add.container(cx, cy).setDepth(10);
   const bg   = s.add.rectangle(0,0, W*0.86, 210, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title= s.add.text(0,-82,'Inventory',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-82,'Inventory',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
 
-  const mainLbl = s.add.text(-160,-46,'Mains:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
-  const specLbl = s.add.text(-160, -6,'Specs:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5);
+  const mainLbl = styleReadableText(s.add.text(-160,-46,'Mains:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
+  const specLbl = styleReadableText(s.add.text(-160, -6,'Specs:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
 
-  const mainVal = s.add.text(-26,-46,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5);
-  const specVal = s.add.text(-26, -6,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5);
+  const mainVal = styleReadableText(s.add.text(-26,-46,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
+  const specVal = styleReadableText(s.add.text(-26, -6,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
 
   cont.add([bg,title,mainLbl,specLbl,mainVal,specVal]);
 
@@ -529,8 +593,8 @@ function buildInventoryPanel(){
   panelButton(cont, -90,  -6, 44, 26, '◀', ()=>{ invCur.spec=(invCur.spec-1+Math.max(1,inventory.specs.length))%Math.max(1,inventory.specs.length); inv_refreshVals(); });
   panelButton(cont,  90,  -6, 44, 26, '▶', ()=>{ invCur.spec=(invCur.spec+1)%Math.max(1,inventory.specs.length); inv_refreshVals(); });
 
-  const lockMain = s.add.text(-160, 36, '☐ Equip selected main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
-  const lockSpec = s.add.text(-160, 56, '☐ Equip selected spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5).setInteractive({useHandCursor:true});
+  const lockMain = styleReadableText(s.add.text(-160, 36, '☐ Equip selected main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const lockSpec = styleReadableText(s.add.text(-160, 56, '☐ Equip selected spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([lockMain, lockSpec]);
 
   let lockM=false, lockS=false;
@@ -560,7 +624,6 @@ function inv_show(){
   if(!invUI) return;
   invCur.main = Math.min(invCur.main, Math.max(0, inventory.mains.length-1));
   invCur.spec = Math.min(invCur.spec, Math.max(0, inventory.specs.length-1));
-  // refresh text
   invUI.mainVal.setText(MAIN_MAP[inventory.mains[invCur.main]]?.name || '—');
   invUI.specVal.setText(SPEC_MAP[inventory.specs[invCur.spec]]?.name || '—');
   invUI.cont.setVisible(true);
@@ -568,7 +631,8 @@ function inv_show(){
 
 /* ================= FX & UI updates ================= */
 
-function swingFx(a,d,dmg){
+// One swipe beam per attack
+function swipeFx(a,d){
   if(duelEnded||pendingKO) return;
   const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y);
   const dist=Phaser.Math.Distance.Between(a.x,a.y,d.x,d.y)-18;
@@ -577,16 +641,46 @@ function swingFx(a,d,dmg){
   s.tweens.add({targets:swipe,alpha:.95,scaleX:1,duration:120,ease:'quad.out',
     onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})});
   s.tweens.add({targets:a.body,scale:1.15,yoyo:true,duration:120});
-  const flash=s.add.circle(d.x,d.y,8,dmg>0?0xffff88:0x8888ff).setAlpha(0.9);
-  s.tweens.add({targets:flash,radius:20,alpha:0,duration:220,onComplete:()=>flash.destroy()});
-  const txt=s.add.text(d.x,d.y-30,dmg>0?`-${dmg}`:'0',{font:'14px Arial',color:'#fff'}).setOrigin(0.5);
-  s.tweens.add({targets:txt,y:d.y-46,alpha:0,duration:700,onComplete:()=>txt.destroy()});
 }
+
+// OSRS-style hitsplats: diamonds w/ tails; multiple values rendered simultaneously
+function hitsplatFx(defender, values, style='melee'){
+  if(duelEnded||pendingKO) return;
+  const baseX=defender.x, baseY=defender.y-30;
+  const spread = 18;
+  const startX = baseX - ((values.length-1)*spread)/2;
+  const fill = SPLAT_COLOR[style] || SPLAT_COLOR.melee;
+
+  values.forEach((v,i)=>{
+    const isZero = (v<=0);
+    const color = isZero ? SPLAT_COLOR.zero : fill;
+
+    const size = 16;
+    const x = startX + i*spread;
+    const y = baseY;
+    const diamond = s.add.rectangle(x, y, size, size, color)
+                      .setAngle(45).setAlpha(0.92);
+    const tail = s.add.triangle(x, y+size*0.55, x-4, y+7, x+4, y+7, x, y+13, color)
+                     .setAlpha(0.92);
+
+    const t=s.add.text(x, y, isZero?'0':`${v}`, {font:'14px Arial', color:'#ffffff'})
+                .setOrigin(0.5).setShadow(0,1,'#000',4,true,true);
+
+    s.tweens.add({targets:[diamond,tail,t], y:'-=16', alpha:0, duration:760,
+      onComplete:()=>{ diamond.destroy(); tail.destroy(); t.destroy(); }});
+
+    if(isZero){
+      s.tweens.add({targets:[diamond,tail,t], x:`+=3`, yoyo:true, repeat:3, duration:60});
+    }
+  });
+}
+
 function eatFx(f,healed){
   if(duelEnded||pendingKO) return;
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
   s.tweens.add({targets:ring,radius:24,alpha:0,duration:260,onComplete:()=>ring.destroy()});
-  const t=s.add.text(f.x,f.y-64,`+${healed}`,{font:'13px Arial',color:'#a9ffb6'}).setOrigin(0.5);
+  const t=s.add.text(f.x,f.y-64,`+${healed}`,{font:'13px Arial',color:'#a9ffb6'}).setOrigin(0.5)
+              .setShadow(0,1,'#000',4,true,true);
   s.tweens.add({targets:t,y:f.y-80,alpha:0,duration:700,onComplete:()=>t.destroy()});
 }
 function deathFx(f){ s.tweens.add({targets:f.body,scale:1.35,alpha:0,duration:320}); }
@@ -608,3 +702,5 @@ function updateSpecUI(f){
   f.specFill.fillColor=r>0.5?0x6fd1ff:(r>0.25?0xf1c14e:0xe86a6a);
   f.specTxt.setText(`Spec ${Math.round(f.spec)}%`);
 }
+
+/* ================= END ================= */
