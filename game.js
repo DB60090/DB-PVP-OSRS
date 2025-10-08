@@ -1,11 +1,8 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory + Armour + OSRS hitsplats
-   - KO-SAFE: lethal hits queue a finish; end handled on next tick; no KO tween by default
-   - Specials: arm → fire on NEXT tick (never same-tick), explicit post-spec recovery
-   - Loot modal with working buttons, localStorage save
-   - Tap “Loot: Mains | Specs” to open Inventory modal; lock equip for next round
-   - Armour sets: offensive style synergies + defensive counters; shown under loadout lines
-   - OSRS-style hitsplats: diamonds w/ tails; multihits show simultaneous splats; zeros shake
-   - “Updated:” stamp taken from game.js Last-Modified header (fallback to now)
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory (consumable) + Armour + OSRS hitsplats
+   - Startup panel: Continue (keep loot) or Restart (wipe). Toggle "Save new loot to device".
+   - Inventory now stores QUANTITIES; equipping from loot for next round CONSUMES 1 copy at round start.
+   - KO-SAFE, Specials (arm → fire next tick), Loot modal, Armour synergies, OSRS hitsplats, layout, and Updated: stamp.
+   - “Updated:” stamp pulled from game.js Last-Modified header (fallback to now).
 */
 
 const W=420, H=640;
@@ -16,13 +13,12 @@ const config={
 };
 new Phaser.Game(config);
 
-// ---- tiny util: set Updated: from game.js ----
+// ---- Updated: stamp from game.js ----
 function setUpdatedStampFromGameJs(){
   const el = document.getElementById('build');
   if(!el) return;
   const pad=n=>String(n).padStart(2,'0');
   const fmt=(d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-
   try{
     const scripts=[...document.getElementsByTagName('script')];
     const me=scripts.find(sc=>/game\.js(?:\?|$)/.test(sc.src));
@@ -102,25 +98,66 @@ const SPLAT_COLOR = {
 
 // ---- runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false, pendingKO=null;
+let startupOpen = true;     // gate interactions until startup panel closed
+let PERSIST_LOOT = true;    // user toggle at startup
 
-// ---- loot save ----
-let inventory = loadInventory();  // { mains:[], specs:[] }
-let nextEquipOverride = { mainId:null, specId:null };
+// ---- inventory (now quantities) ----
+// structure: { mains:{[id]:count}, specs:{[id]:count} }
+let inventory = loadInventory();
+let nextEquipOverride = { mainId:null, specId:null }; // if set, will CONSUME 1 copy at round start
+
+function emptyInv(){ return {mains:{}, specs:{}}; }
+
 function loadInventory(){
-  try{ const raw=localStorage.getItem('pvp_inventory');
-       if(raw){ const o=JSON.parse(raw); return {mains:o.mains||[], specs:o.specs||[]}; } }
-  catch(e){}
-  return { mains:[], specs:[] };
+  try{
+    const raw=localStorage.getItem('pvp_inventory');
+    if(!raw) return emptyInv();
+    const o=JSON.parse(raw);
+    // migration: arrays -> counts of 1
+    if(Array.isArray(o.mains) || Array.isArray(o.specs)){
+      const mains={}, specs={};
+      (o.mains||[]).forEach(id=>{ mains[id]=(mains[id]||0)+1; });
+      (o.specs||[]).forEach(id=>{ specs[id]=(specs[id]||0)+1; });
+      return {mains, specs};
+    }
+    // normal path
+    return {mains:o.mains||{}, specs:o.specs||{}};
+  }catch(e){ return emptyInv(); }
 }
 function saveInventory(){
+  if(!PERSIST_LOOT) return; // session-only mode
   try{ localStorage.setItem('pvp_inventory', JSON.stringify(inventory)); }catch(e){}
+}
+function clearSavedInventory(){
+  try{ localStorage.removeItem('pvp_inventory'); }catch(e){}
+}
+
+function invAdd(kind,id,count=1){
+  const bag = kind==='main'?inventory.mains:inventory.specs;
+  bag[id]=(bag[id]||0)+count;
+  saveInventory();
+}
+function invHas(kind,id,count=1){
+  const bag = kind==='main'?inventory.mains:inventory.specs;
+  return (bag[id]||0) >= count;
+}
+function invConsume(kind,id,count=1){
+  const bag = kind==='main'?inventory.mains:inventory.specs;
+  if((bag[id]||0) < count) return false;
+  bag[id]-=count;
+  if(bag[id]<=0) delete bag[id];
+  saveInventory();
+  return true;
+}
+function invTotals(){
+  const tot=(obj)=>Object.values(obj).reduce((a,b)=>a+b,0);
+  return {mains:tot(inventory.mains), specs:tot(inventory.specs)};
 }
 
 function preload(){}
 
 function create(){
   s=this;
-
   setUpdatedStampFromGameJs();
 
   styleReadableText(s.add.text(W/2,22,'RuneScape-Style PvP (Offline)',{font:'18px Arial',color:'#fff'}).setOrigin(0.5));
@@ -140,17 +177,16 @@ function create(){
   p.armourTxt=styleReadableText(s.add.text(p.x,p.y-58,'',{font:'10px Arial',color:'#bfe0ff'}).setOrigin(0.5));
   e.armourTxt=styleReadableText(s.add.text(e.x,e.y-58,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5));
 
-  // bottom HUD slightly higher to clear Safari bar
   const HUD_Y = H - 190;
 
   ui.status=styleReadableText(s.add.text(W/2,HUD_Y,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5));
   ui.invTxt=styleReadableText(s.add.text(W/2,HUD_Y+18,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5));
   ui.invTxt.setInteractive({useHandCursor:true});
-  ui.invTxt.on('pointerdown', ()=>{ if(!duelActive) inv_show(); });
+  ui.invTxt.on('pointerdown', ()=>{ if(!duelActive && !startupOpen) inv_show(); });
 
-  // Buttons: Start/Rematch centered; Reroll left, SPEC right
+  // Buttons
   ui.rerollBtn=button(W/2-120,HUD_Y+52,144,38,'Reroll Loadouts',()=>{
-    if(duelActive) return;
+    if(duelActive || startupOpen) return;
     rollBothLoadouts(); refreshLoadoutTexts();
     ui.status.setText('Loadouts rolled. Ready!');
   });
@@ -161,16 +197,14 @@ function create(){
 
   buildLootPanel();
   buildInventoryPanel();
+  buildStartupPanel();     // << Startup modal
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
 
 /* ================= Fighter & UI helpers ================= */
 
-function styleReadableText(txt){
-  txt.setShadow(0,1,'#000',4,true,true);
-  return txt;
-}
+function styleReadableText(txt){ txt.setShadow(0,1,'#000',4,true,true); return txt; }
 
 function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
@@ -217,7 +251,6 @@ function smallButton(x,y,w,h,label,onClick){
   return bg;
 }
 
-// Button that lives *inside a container* (used by popups)
 function panelButton(parent, x, y, w, h, label, onClick){
   const bg = s.add.rectangle(x, y, w, h, 0x2a2f45).setStrokeStyle(2, 0x151826).setOrigin(0.5);
   const txt = styleReadableText(s.add.text(x, y, label, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5));
@@ -229,13 +262,12 @@ function panelButton(parent, x, y, w, h, label, onClick){
   return { bg, txt, setLabel:(t)=>txt.setText(t) };
 }
 
-/* ================= Loadouts ================= */
+/* ================= Loadouts (consuming one-time equips) ================= */
 
 const pickRandom=a=>a[(Math.random()*a.length)|0];
-const weaponStyle = w => w?.style || 'melee'; // safety default
+const weaponStyle = w => w?.style || 'melee';
 
 function rollArmourFor(f){
-  // Prefer armour that matches weapon style about 60% of the time
   const st = weaponStyle(f.mainWeapon);
   const poolMatch = ARMOUR_SETS.filter(a=>a.affinity===st);
   const poolAny   = ARMOUR_SETS;
@@ -243,14 +275,27 @@ function rollArmourFor(f){
 }
 
 function rollLoadout(f){
-  f.mainWeapon = (f===s.player && nextEquipOverride.mainId && MAIN_MAP[nextEquipOverride.mainId])
-    ? MAIN_MAP[nextEquipOverride.mainId] : pickRandom(MAIN_WEAPONS);
-  f.specWeapon = (f===s.player && nextEquipOverride.specId && SPEC_MAP[nextEquipOverride.specId])
-    ? SPEC_MAP[nextEquipOverride.specId] : pickRandom(SPEC_WEAPONS);
+  // Apply *consumable* equips for the player if requested
+  if(f===s.player && nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)){
+    f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
+    invConsume('main', nextEquipOverride.mainId, 1); // consume 1 copy
+  }else{
+    f.mainWeapon = pickRandom(MAIN_WEAPONS);
+  }
+
+  if(f===s.player && nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)){
+    f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
+    invConsume('spec', nextEquipOverride.specId, 1); // consume 1 copy
+  }else{
+    f.specWeapon = pickRandom(SPEC_WEAPONS);
+  }
+
+  // When consumed, clear the override (single-use equip lock-in)
+  if(f===s.player){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
+
   rollArmourFor(f);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
-function clearNextOverrides(){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
 function refreshLoadoutTexts(){
   const p=s.player,e=s.enemy;
   p.loadoutTxt.setText(`Main: ${p.mainWeapon.name}  |  Spec: ${p.specWeapon.name}`);
@@ -260,13 +305,13 @@ function refreshLoadoutTexts(){
   ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
   ui.invTxt.setText(invLabel());
 }
-function invLabel(){ return `Loot: Mains ${inventory.mains.length} | Specs ${inventory.specs.length}`; }
+function invLabel(){ const t=invTotals(); return `Loot: Mains ${t.mains} | Specs ${t.specs}`; }
 
 /* ================= Combat control ================= */
 
 function startDuel(){
-  const hintEl = document.getElementById('hint');
-  if(hintEl) hintEl.style.display='none';
+  if(startupOpen) return;
+  const hintEl = document.getElementById('hint'); if(hintEl) hintEl.style.display='none';
   if(duelActive) return;
   duelActive=true; duelEnded=false; pendingKO=null;
   ui.status.setText('Fight!'); ui.startBtn.setVisible(false); ui.rematchBtn.setVisible(false);
@@ -344,7 +389,7 @@ function safeEnd(winner, loser){
 function rematch(){
   resetFighter(s.player); resetFighter(s.enemy);
   rollBothLoadouts(); refreshLoadoutTexts();
-  clearNextOverrides(); duelEnded=false; pendingKO=null;
+  duelEnded=false; pendingKO=null;
   ui.status.setText('Reroll loadouts, then Start Duel');
   ui.startBtn.setVisible(true); ui.rematchBtn.setVisible(false);
   ui.specBtn.setActiveState(false);
@@ -361,7 +406,7 @@ function resetFighter(f){
 
 function togglePlayerSpec(){
   const p=s.player;
-  if(!duelActive || !p.alive || duelEnded || pendingKO) return;
+  if(startupOpen || !duelActive || !p.alive || duelEnded || pendingKO) return;
   if(p.wantSpec){ p.wantSpec=false; p.armedSpecTick=-1; ui.specBtn.setActiveState(false); ui.status.setText('Special disarmed'); return; }
   if(!canSpec(p)){ ui.status.setText('Not ready (energy/cooldown)'); return; }
   p.wantSpec=true; p.armedSpecTick=tickCount; ui.specBtn.setActiveState(true);
@@ -393,7 +438,7 @@ function defensiveDebuff(defender, incomingStyle){
   if(!a) return {acc:0, dmg:1};
   const vs = (a.def && a.def[incomingStyle]) || null;
   if(!vs) return {acc:0, dmg:1};
-  return {acc:vs.acc, dmg:1+vs.dmg}; // usually ≤1
+  return {acc:vs.acc, dmg:1+vs.dmg}; // <=1 usually
 }
 function computeAttack(attacker, defender, accBonus=0, dmgMult=1){
   const style = weaponStyle(attacker.mainWeapon);
@@ -415,7 +460,7 @@ function doSwing(attacker,defender,accBonus=0,dmgMult=1){
   const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
 
   swipeFx(attacker,defender);
-  hitsplatFx(defender, [dmg], style); // single splat
+  hitsplatFx(defender, [dmg], style);
   applyDamage(defender, dmg);
 }
 
@@ -487,14 +532,10 @@ function performSpecial(a,d){
 /* ================= Eating / Regen ================= */
 
 function tryAutoEat(f){
-  if(duelEnded||pendingKO) return;
-  if(f.food<=0) return;
-  if(f.lastEatTick===tickCount) return;
+  if(duelEnded||pendingKO) return; if(f.food<=0) return; if(f.lastEatTick===tickCount) return;
   f.food--; f.lastEatTick=tickCount;
-
   const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+FOOD_HEAL); const healed=f.hp-before;
-  f.nextAttack = f.nextAttack + EAT_COST_TK; // minor delay
-
+  f.nextAttack = f.nextAttack + EAT_COST_TK;
   updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
   if(!duelEnded) ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
 }
@@ -508,20 +549,20 @@ function buildLootPanel(){
 
   const cx=W/2, cy=H*0.34;
   const cont = s.add.container(cx, cy).setDepth(10);
-  const bg   = s.add.rectangle(0,0, W*0.86, 190, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title= styleReadableText(s.add.text(0,-72,'Loot Found',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
+  const bg   = s.add.rectangle(0,0, W*0.86, 210, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-82,'Loot Found',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
 
-  const mainTxt = styleReadableText(s.add.text(-160, -38, 'Main: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
-  const specTxt = styleReadableText(s.add.text(-160, -14, 'Spec: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
+  const mainTxt = styleReadableText(s.add.text(-160, -48, 'Main: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
+  const specTxt = styleReadableText(s.add.text(-160, -22, 'Spec: —', {font:'14px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
 
   cont.add([bg,title,mainTxt,specTxt]);
 
-  panelButton(cont, -60, 30, 120, 32, 'Take Main', ()=>loot_takeMain());
-  panelButton(cont,  60, 30, 120, 32, 'Take Spec', ()=>loot_takeSpec());
-  panelButton(cont, 150, 70,  86, 28, 'Close', ()=>loot_hide());
+  const takeMainBtn = panelButton(cont, -50, 24, 120, 30, 'Take Main (+1)', ()=>loot_takeMain());
+  const takeSpecBtn = panelButton(cont,  70, 24, 120, 30, 'Take Spec (+1)', ()=>loot_takeSpec());
+  panelButton(cont, 160, 86,  86, 28, 'Close', ()=>loot_hide());
 
-  const equipNextMain = styleReadableText(s.add.text(-160, 58, '☐ Equip main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
-  const equipNextSpec = styleReadableText(s.add.text(-160, 78, '☐ Equip spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const equipNextMain = styleReadableText(s.add.text(-160, 60, '☐ Equip main next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const equipNextSpec = styleReadableText(s.add.text(-160, 80, '☐ Equip spec next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([equipNextMain, equipNextSpec]);
 
   cont.setVisible(false);
@@ -533,24 +574,22 @@ function buildLootPanel(){
 
   equipNextMain.on('pointerdown', ()=>{
     lootUI.equipMain=!lootUI.equipMain;
-    equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round');
+    equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round (consumes 1)');
   });
   equipNextSpec.on('pointerdown', ()=>{
     lootUI.equipSpec=!lootUI.equipSpec;
-    equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round');
+    equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round (consumes 1)');
   });
 
   function loot_takeMain(){
     if(!lootUI.currentMainId) return;
-    if(!inventory.mains.includes(lootUI.currentMainId)){
-      inventory.mains.push(lootUI.currentMainId); saveInventory(); ui.invTxt.setText(invLabel());
-    }
+    invAdd('main', lootUI.currentMainId, 1);
+    ui.invTxt.setText(invLabel());
   }
   function loot_takeSpec(){
     if(!lootUI.currentSpecId) return;
-    if(!inventory.specs.includes(lootUI.currentSpecId)){
-      inventory.specs.push(lootUI.currentSpecId); saveInventory(); ui.invTxt.setText(invLabel());
-    }
+    invAdd('spec', lootUI.currentSpecId, 1);
+    ui.invTxt.setText(invLabel());
   }
 }
 function loot_show(mainId, specId){
@@ -558,8 +597,8 @@ function loot_show(mainId, specId){
   lootUI.currentMainId = mainId || null;
   lootUI.currentSpecId = specId || null;
   lootUI.equipMain=false; lootUI.equipSpec=false;
-  lootUI.equipNextMain.setText('☐ Equip main next round');
-  lootUI.equipNextSpec.setText('☐ Equip spec next round');
+  lootUI.equipNextMain.setText('☐ Equip main next round (consumes 1)');
+  lootUI.equipNextSpec.setText('☐ Equip spec next round (consumes 1)');
   lootUI.mainTxt.setText(`Main: ${MAIN_MAP[mainId]?.name || '—'}`);
   lootUI.specTxt.setText(`Spec: ${SPEC_MAP[specId]?.name || '—'}`);
   lootUI.cont.setVisible(true);
@@ -573,60 +612,119 @@ function loot_hide(){
 
 /* ================= Inventory modal (tap “Loot: …”) ================= */
 
-let invUI=null, invCur={main:0, spec:0};
+let invUI=null, invCur={mainIdx:0, specIdx:0}, invKeys={mains:[], specs:[]};
 function buildInventoryPanel(){
   const cx=W/2, cy=H*0.36;
   const cont = s.add.container(cx, cy).setDepth(10);
-  const bg   = s.add.rectangle(0,0, W*0.86, 210, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title= styleReadableText(s.add.text(0,-82,'Inventory',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
+  const bg   = s.add.rectangle(0,0, W*0.86, 230, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-92,'Inventory',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
 
-  const mainLbl = styleReadableText(s.add.text(-160,-46,'Mains:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
-  const specLbl = styleReadableText(s.add.text(-160, -6,'Specs:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
+  const mainLbl = styleReadableText(s.add.text(-160,-56,'Mains:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
+  const specLbl = styleReadableText(s.add.text(-160, -16,'Specs:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0,0.5));
 
-  const mainVal = styleReadableText(s.add.text(-26,-46,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
-  const specVal = styleReadableText(s.add.text(-26, -6,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
+  const mainVal = styleReadableText(s.add.text(-26,-56,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
+  const specVal = styleReadableText(s.add.text(-26, -16,'—',{font:'14px Arial',color:'#ffffff'}).setOrigin(0,0.5));
 
   cont.add([bg,title,mainLbl,specLbl,mainVal,specVal]);
 
-  panelButton(cont, -90, -46, 44, 26, '◀', ()=>{ invCur.main=(invCur.main-1+Math.max(1,inventory.mains.length))%Math.max(1,inventory.mains.length); inv_refreshVals(); });
-  panelButton(cont,  90, -46, 44, 26, '▶', ()=>{ invCur.main=(invCur.main+1)%Math.max(1,inventory.mains.length); inv_refreshVals(); });
-  panelButton(cont, -90,  -6, 44, 26, '◀', ()=>{ invCur.spec=(invCur.spec-1+Math.max(1,inventory.specs.length))%Math.max(1,inventory.specs.length); inv_refreshVals(); });
-  panelButton(cont,  90,  -6, 44, 26, '▶', ()=>{ invCur.spec=(invCur.spec+1)%Math.max(1,inventory.specs.length); inv_refreshVals(); });
+  panelButton(cont, -90, -56, 44, 26, '◀', ()=>{ browse('main', -1); });
+  panelButton(cont,  90, -56, 44, 26, '▶', ()=>{ browse('main', +1); });
+  panelButton(cont, -90, -16, 44, 26, '◀', ()=>{ browse('spec', -1); });
+  panelButton(cont,  90, -16, 44, 26, '▶', ()=>{ browse('spec', +1); });
 
-  const lockMain = styleReadableText(s.add.text(-160, 36, '☐ Equip selected main next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
-  const lockSpec = styleReadableText(s.add.text(-160, 56, '☐ Equip selected spec next round', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const lockMain = styleReadableText(s.add.text(-160, 28, '☐ Equip selected main next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  const lockSpec = styleReadableText(s.add.text(-160, 48, '☐ Equip selected spec next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([lockMain, lockSpec]);
 
   let lockM=false, lockS=false;
-  lockMain.on('pointerdown', ()=>{ lockM=!lockM; lockMain.setText((lockM?'☑':'☐')+' Equip selected main next round'); });
-  lockSpec.on('pointerdown', ()=>{ lockS=!lockS; lockSpec.setText((lockS?'☑':'☐')+' Equip selected spec next round'); });
+  lockMain.on('pointerdown', ()=>{ lockM=!lockM; lockMain.setText((lockM?'☑':'☐')+' Equip selected main next round (consumes 1)'); });
+  lockSpec.on('pointerdown', ()=>{ lockS=!lockS; lockSpec.setText((lockS?'☑':'☐')+' Equip selected spec next round (consumes 1)'); });
 
-  panelButton(cont, 150, 82, 86, 28, 'Close', ()=>{
-    const mainId = inventory.mains[invCur.main];
-    const specId = inventory.specs[invCur.spec];
-    if(lockM && mainId) nextEquipOverride.mainId = mainId;
-    if(lockS && specId) nextEquipOverride.specId = specId;
+  panelButton(cont, 150, 92, 86, 28, 'Close', ()=>{
+    const mainId = invKeys.mains[invCur.mainIdx];
+    const specId = invKeys.specs[invCur.specIdx];
+    if(lockM && mainId && invHas('main',mainId)) nextEquipOverride.mainId = mainId;
+    if(lockS && specId && invHas('spec',specId)) nextEquipOverride.specId = specId;
     cont.setVisible(false);
   });
 
   cont.setVisible(false);
 
-  invUI = { cont, mainVal, specVal };
+  invUI = { cont, mainVal, specVal, lockMain, lockSpec };
+
+  function browse(kind, delta){
+    refreshKeys();
+    if(kind==='main'){
+      const L=invKeys.mains.length||1;
+      invCur.mainIdx=( (invCur.mainIdx+delta)%L + L )%L;
+    }else{
+      const L=invKeys.specs.length||1;
+      invCur.specIdx=( (invCur.specIdx+delta)%L + L )%L;
+    }
+    inv_refreshVals();
+  }
+
+  function refreshKeys(){
+    invKeys.mains = Object.keys(inventory.mains);
+    invKeys.specs = Object.keys(inventory.specs);
+    invCur.mainIdx = Math.min(invCur.mainIdx, Math.max(0, invKeys.mains.length-1));
+    invCur.specIdx = Math.min(invCur.specIdx, Math.max(0, invKeys.specs.length-1));
+  }
 
   function inv_refreshVals(){
-    invUI.mainVal.setText(MAIN_MAP[inventory.mains[invCur.main]]?.name || '—');
-    invUI.specVal.setText(SPEC_MAP[inventory.specs[invCur.spec]]?.name || '—');
+    const mid = invKeys.mains[invCur.mainIdx];
+    const sid = invKeys.specs[invCur.specIdx];
+    invUI.mainVal.setText(mid ? `${MAIN_MAP[mid]?.name||mid}  x${inventory.mains[mid]}` : '—');
+    invUI.specVal.setText(sid ? `${SPEC_MAP[sid]?.name||sid}  x${inventory.specs[sid]}` : '—');
   }
-  inv_refreshVals();
+
+  invUI.refreshKeys = refreshKeys;
+  invUI.refreshVals = inv_refreshVals;
+
+  refreshKeys(); inv_refreshVals();
 }
 
 function inv_show(){
   if(!invUI) return;
-  invCur.main = Math.min(invCur.main, Math.max(0, inventory.mains.length-1));
-  invCur.spec = Math.min(invCur.spec, Math.max(0, inventory.specs.length-1));
-  invUI.mainVal.setText(MAIN_MAP[inventory.mains[invCur.main]]?.name || '—');
-  invUI.specVal.setText(SPEC_MAP[inventory.specs[invCur.spec]]?.name || '—');
+  invUI.refreshKeys(); invUI.refreshVals();
   invUI.cont.setVisible(true);
+}
+
+/* ================= Startup modal ================= */
+
+function buildStartupPanel(){
+  const cx=W/2, cy=H*0.34;
+  const cont = s.add.container(cx, cy).setDepth(20);
+  const bg   = s.add.rectangle(0,0, W*0.86, 230, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-86,'Welcome',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
+
+  const desc1= styleReadableText(s.add.text(0,-56,'Choose how to start this session:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0.5));
+  const toggleTxt= styleReadableText(s.add.text(-160,10,'☑ Save new loot to this device',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5));
+  toggleTxt.setInteractive({useHandCursor:true});
+  let saveOn=true;
+  toggleTxt.on('pointerdown', ()=>{ saveOn=!saveOn; toggleTxt.setText((saveOn?'☑':'☐')+' Save new loot to this device'); });
+
+  const btnCont = s.add.container(0,60);
+  const btnContinue = panelButton(btnCont,-70,0,120,34,'Continue', ()=>{
+    PERSIST_LOOT = saveOn;
+    // keep existing inventory as loaded
+    saveInventory(); // persist choice (may no-op if unchecked)
+    cont.setVisible(false); startupOpen=false;
+    ui.status.setText('Continue selected — good luck!');
+    ui.invTxt.setText(invLabel());
+  });
+  const btnRestart = panelButton(btnCont, 70,0,120,34,'Restart', ()=>{
+    PERSIST_LOOT = saveOn;
+    clearSavedInventory();
+    inventory = emptyInv();
+    saveInventory(); // if persist chosen, write empty; else no-op
+    cont.setVisible(false); startupOpen=false;
+    ui.status.setText('Restarted with empty loot.');
+    ui.invTxt.setText(invLabel());
+  });
+  cont.add([bg,title,desc1,toggleTxt,btnCont]);
+
+  cont.setVisible(true);
 }
 
 /* ================= FX & UI updates ================= */
@@ -658,20 +756,14 @@ function hitsplatFx(defender, values, style='melee'){
     const size = 16;
     const x = startX + i*spread;
     const y = baseY;
-    const diamond = s.add.rectangle(x, y, size, size, color)
-                      .setAngle(45).setAlpha(0.92);
-    const tail = s.add.triangle(x, y+size*0.55, x-4, y+7, x+4, y+7, x, y+13, color)
-                     .setAlpha(0.92);
-
-    const t=s.add.text(x, y, isZero?'0':`${v}`, {font:'14px Arial', color:'#ffffff'})
-                .setOrigin(0.5).setShadow(0,1,'#000',4,true,true);
+    const diamond = s.add.rectangle(x, y, size, size, color).setAngle(45).setAlpha(0.92);
+    const tail = s.add.triangle(x, y+size*0.55, x-4, y+7, x+4, y+7, x, y+13, color).setAlpha(0.92);
+    const t=s.add.text(x, y, isZero?'0':`${v}`, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5).setShadow(0,1,'#000',4,true,true);
 
     s.tweens.add({targets:[diamond,tail,t], y:'-=16', alpha:0, duration:760,
       onComplete:()=>{ diamond.destroy(); tail.destroy(); t.destroy(); }});
 
-    if(isZero){
-      s.tweens.add({targets:[diamond,tail,t], x:`+=3`, yoyo:true, repeat:3, duration:60});
-    }
+    if(isZero){ s.tweens.add({targets:[diamond,tail,t], x:`+=3`, yoyo:true, repeat:3, duration:60}); }
   });
 }
 
@@ -679,8 +771,7 @@ function eatFx(f,healed){
   if(duelEnded||pendingKO) return;
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
   s.tweens.add({targets:ring,radius:24,alpha:0,duration:260,onComplete:()=>ring.destroy()});
-  const t=s.add.text(f.x,f.y-64,`+${healed}`,{font:'13px Arial',color:'#a9ffb6'}).setOrigin(0.5)
-              .setShadow(0,1,'#000',4,true,true);
+  const t=s.add.text(f.x,f.y-64,`+${healed}`,{font:'13px Arial',color:'#a9ffb6'}).setOrigin(0.5).setShadow(0,1,'#000',4,true,true);
   s.tweens.add({targets:t,y:f.y-80,alpha:0,duration:700,onComplete:()=>t.destroy()});
 }
 function deathFx(f){ s.tweens.add({targets:f.body,scale:1.35,alpha:0,duration:320}); }
@@ -702,5 +793,3 @@ function updateSpecUI(f){
   f.specFill.fillColor=r>0.5?0x6fd1ff:(r>0.25?0xf1c14e:0xe86a6a);
   f.specTxt.setText(`Spec ${Math.round(f.spec)}%`);
 }
-
-/* ================= END ================= */
