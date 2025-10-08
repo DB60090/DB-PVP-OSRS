@@ -1,9 +1,10 @@
 /* PvP (offline) — iPhone + Food (Shark/Karam) + Tick Specials + Random Loadouts
    + Loot (consumable) + Inventory + Armour + OSRS hitsplats + Stick-figure anims
-   - Shark (20 heal) = instant but TAKES TURN (resets next attack by weapon speed)
-   - Karam (18 heal) = instant and DOESN'T take turn
+   - Shark (20 heal) = instant but TAKES TURN (resets next attack by weapon speed; once per tick)
+   - Karam (18 heal) = instant and DOESN'T take turn (once per tick)
    - Start each round: 20 Sharks, 10 Karams (both sides)
-   - One shark + one karam allowed per tick (combo); no double of same food on a tick
+   - One shark + one karam allowed per tick (combo)
+   - Bot eats smarter: if it can likely KO with spec or next swing, it won't eat
    - Startup panel (Continue/Restart + Save toggle), Updated: timestamp from game.js
 */
 
@@ -17,13 +18,13 @@ new Phaser.Game(config);
 
 // -------- UI layout (tweak here) --------
 const UI = {
-  nameDy   : -96,
-  loadoutDy: -80,
-  armourDy : -66,
-  hpDy     : -86,   // HP ABOVE head
-  foodDy   : -28,   // below body
-  specDy   : -14,   // below body
-  hitsplatDy: -106, // above head
+  nameDy   : -118,
+  loadoutDy: -102,
+  armourDy : -88,
+  hpDy     : -136,  // HP ABOVE head (higher)
+  foodDy   : +22,   // below body (down)
+  specDy   : +38,   // further below
+  hitsplatDy: -156, // well above head
   arenaY   : H*0.44 // fighter baseline
 };
 
@@ -38,15 +39,9 @@ function setUpdatedStampFromGameJs(){
     const me=scripts.find(sc=>/game\.js(?:\?|$)/.test(sc.src));
     const src=me?me.src:'./game.js';
     fetch(src, {method:'HEAD', cache:'no-cache'})
-      .then(r=>{
-        const lm=r.headers.get('last-modified');
-        const when = lm ? new Date(lm) : new Date();
-        el.textContent=`Updated: ${fmt(when)}`;
-      })
+      .then(r=>{ const lm=r.headers.get('last-modified'); const when = lm ? new Date(lm) : new Date(); el.textContent=`Updated: ${fmt(when)}`; })
       .catch(()=>{ el.textContent=`Updated: ${fmt(new Date())}`; });
-  }catch(e){
-    el.textContent=`Updated: ${fmt(new Date())}`;
-  }
+  }catch(e){ el.textContent=`Updated: ${fmt(new Date())}`; }
 }
 
 // ---- toggles ----
@@ -167,13 +162,9 @@ function create(){
   });
   ui.specBtn   = smallButton(W/2+150,HUD_Y+52,110,36,'SPEC',togglePlayerSpec);
 
-  // NEW: manual eat buttons
-  ui.eatSharkBtn = smallButton(W/2-90,HUD_Y+94,120,46,'Eat Shark (20)', ()=>{
-    eatShark(s.player,'manual');
-  });
-  ui.eatKaramBtn = smallButton(W/2+90,HUD_Y+94,120,46,'Karam (10)', ()=>{
-    eatKaram(s.player,'manual');
-  });
+  // manual eat buttons
+  ui.eatSharkBtn = smallButton(W/2-90,HUD_Y+94,120,46,'Eat Shark (20)', ()=>{ eatShark(s.player,'manual'); });
+  ui.eatKaramBtn = smallButton(W/2+90,HUD_Y+94,120,46,'Karam (18)', ()=>{ eatKaram(s.player,'manual'); });
 
   ui.startBtn  = button(W/2,HUD_Y+140,190,46,'Start Duel',()=>startDuel());
   ui.rematchBtn= button(W/2,HUD_Y+140,190,46,'Rematch',()=>rematch());
@@ -192,10 +183,8 @@ function styleReadableText(txt){ txt.setShadow(0,1,'#000',4,true,true); return t
 
 function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
-    // food system
     sharks:SHARK_START, karams:KARAM_START,
     lastSharkTick:-999, lastKaramTick:-999,
-    // spec & combat
     spec:SPEC_MAX, mainWeapon:null,specWeapon:null,nextAttack:0,
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
     armour:null
@@ -211,10 +200,10 @@ function makeFighter(o){
   f.hpText=styleReadableText(s.add.text(f.x,f.y+UI.hpDy,'',{font:'11px Arial',color:'#fff'}).setOrigin(0.5));
 
   // Food/spec below body
-  f.foodBg=s.add.rectangle(f.x,f.y+UI.foodDy,124,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.foodBg=s.add.rectangle(f.x,f.y+UI.foodDy,136,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
   f.foodTxt=styleReadableText(s.add.text(f.x,f.y+UI.foodDy,`Shark ${f.sharks} | Karam ${f.karams}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
-  f.specBg=s.add.rectangle(f.x,f.y+UI.specDy,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0,0.5);
+  f.specBg=s.add.rectangle(f.x,f.y+UI.specDy,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
   f.specFill=s.add.rectangle(f.x-55,f.y+UI.specDy,110,4,0x6fd1ff).setOrigin(0,0.5);
   f.specTxt=styleReadableText(s.add.text(f.x,f.y+UI.specDy+14,`Spec ${f.spec}%`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
@@ -364,9 +353,7 @@ function rematch(){
 }
 function resetFighter(f){
   f.hp=f.maxHp; f.alive=true;
-  // reset food
   f.sharks=SHARK_START; f.karams=KARAM_START; f.lastSharkTick=-999; f.lastKaramTick=-999;
-  // reset spec
   f.spec=SPEC_MAX; f.wantSpec=false; f.armedSpecTick=-1; f.specCooldown=0; f.lastSpecTick=-999;
   f.nextAttack=0; f.body.setAlpha(1).setScale(1).setAngle(0);
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
@@ -420,6 +407,18 @@ function computeAttack(attacker, defender, accBonus=0, dmgMult=1){
   const max = Math.round(attacker.mainWeapon.maxHit * effDmgMult);
   return {style, hitChance, max};
 }
+function swingMax(attacker, defender){ return computeAttack(attacker,defender,0,1).max; }
+function specPotentialMax(attacker, defender){
+  const w = attacker.mainWeapon, t = attacker.specWeapon?.type||'none';
+  if(!w) return 0;
+  // approximate per spec
+  if(t==='dds')    return computeAttack(attacker,defender,0.15,1.15).max*2;
+  if(t==='claws')  return computeAttack(attacker,defender,0.10,1.8).max;        // total 1.8x
+  if(t==='ags')    return computeAttack(attacker,defender,0.15,1.5).max;
+  if(t==='dbow')   return computeAttack(attacker,defender,0.10,1.25).max*2;
+  if(t==='vstaff') return computeAttack(attacker,defender,0.20,1.8).max;
+  return computeAttack(attacker,defender,0,1).max;
+}
 
 /* ================= Single + Multi swings (OSRS hitsplats) ================= */
 
@@ -459,9 +458,6 @@ function applyDamage(defender, total){
       pendingKO={winner:(defender===s.player? s.enemy:s.player), loser:defender};
       return;
     }
-    // player is manual; bot uses its own logic
-  }else{
-    // no damage: nothing
   }
 }
 
@@ -496,9 +492,8 @@ function performSpecial(a,d){
 
 /* ================= Eating ================= */
 
-// Player buttons call these; bot AI also calls them.
 function eatShark(f, source='auto'){
-  if(!f.alive || pendingKO) return;
+  if(!f.alive || pendingKO || !duelActive) return;
   if(f.sharks<=0) return;
   if(f.lastSharkTick===tickCount) return; // one shark per tick
   f.sharks--; f.lastSharkTick=tickCount;
@@ -510,24 +505,34 @@ function eatShark(f, source='auto'){
   if(f===s.player) ui.status.setText(`You eat a Shark (+${healed})`);
 }
 function eatKaram(f, source='auto'){
-  if(!f.alive || pendingKO) return;
+  if(!f.alive || pendingKO || !duelActive) return;
   if(f.karams<=0) return;
   if(f.lastKaramTick===tickCount) return; // one karam per tick
   f.karams--; f.lastKaramTick=tickCount;
   const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+KARAM_HEAL); const healed=f.hp-before;
-  // DOES NOT TAKE TURN: no change to nextAttack
+  // DOES NOT TAKE TURN
   updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
   if(f===s.player) ui.status.setText(`You eat a Karambwan (+${healed})`);
 }
 
-// Very simple bot logic: if low, eat shark; if very low, combo with karam.
+// Smarter bot: if it can likely KO with spec (soon) or next swing, it won't eat.
 function botEatLogic(bot, opponent){
   if(!bot.alive) return;
-  // if already ate both types this tick, stop
-  const needShark = bot.hp<=EAT_THRESH && bot.sharks>0 && bot.lastSharkTick!==tickCount;
-  const needKaram = bot.hp<=Math.max(20, EAT_THRESH-12) && bot.karams>0 && bot.lastKaramTick!==tickCount;
-  if(needShark) eatShark(bot,'auto');
-  if(needKaram) eatKaram(bot,'auto');
+
+  // Check KO potentials
+  const canKillNowWithSwing = (bot.nextAttack<=0) && (swingMax(bot, opponent) >= opponent.hp);
+  const canKillVerySoonWithSpec = canSpec(bot) && (bot.nextAttack<=1) && (specPotentialMax(bot, opponent) >= opponent.hp);
+
+  // If lethal is possible, skip eating to go for kill
+  if(canKillNowWithSwing || canKillVerySoonWithSpec) return;
+
+  // Otherwise, eat under thresholds
+  const wantShark = bot.hp<=EAT_THRESH && bot.sharks>0 && bot.lastSharkTick!==tickCount;
+  const wantKaram = bot.hp<=Math.max(20, EAT_THRESH-10) && bot.karams>0 && bot.lastKaramTick!==tickCount;
+
+  // Prefer shark first (takes turn), then karam if still low
+  if(wantShark) eatShark(bot,'auto');
+  if(wantKaram) eatKaram(bot,'auto');
 }
 
 /* ================= Regen ================= */
@@ -679,9 +684,8 @@ function buildStartupPanel(){
   cont.add([bg,title,desc1,toggleTxt,btnCont]); cont.setVisible(true);
 }
 
-/* ================= FX & UI updates (incl. stick figures & hitsplats) ================= */
+/* ================= FX & UI updates (stick figures & hitsplats) ================= */
 
-// --- stick figure builder & anims (unchanged from previous message) ---
 function buildStickFigure(x,y,fill=0x66ccff, outline=0x003355){
   const c = s.add.container(x,y);
   const headR=10, torsoH=20, legH=18, armL=16;
@@ -757,7 +761,6 @@ function sf_specFx(type, a, d){
     s.tweens.add({targets:ring, radius:40, alpha:0, duration:340, onComplete:()=>ring.destroy()});
   }
 }
-// style-aware attack animation bridge
 function swipeFx(a,d){
   const st = (a.mainWeapon && a.mainWeapon.style) || 'melee';
   if(st==='melee')      sf_meleeSwing(a,d);
