@@ -1,8 +1,9 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory (consumable) + Armour + OSRS hitsplats
-   - Startup panel: Continue (keep loot) or Restart (wipe). Toggle "Save new loot to device".
-   - Inventory now stores QUANTITIES; equipping from loot for next round CONSUMES 1 copy at round start.
-   - KO-SAFE, Specials (arm → fire next tick), Loot modal, Armour synergies, OSRS hitsplats, layout, and Updated: stamp.
-   - “Updated:” stamp pulled from game.js Last-Modified header (fallback to now).
+/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory (consumable)
+   + Armour + OSRS hitsplats + Stick-figure fighters & anims
+   - Startup panel: Continue/Restart + "Save new loot to this device"
+   - Inventory stores quantities; equipping from loot CONSUMES 1 at round start
+   - OSRS-style multi hitsplats; spec flourishes
+   - "Updated:" reads game.js Last-Modified (fallback to now)
 */
 
 const W=420, H=640;
@@ -88,71 +89,39 @@ const ARMOUR_SETS = [
 ];
 const ARMOUR_MAP = Object.fromEntries(ARMOUR_SETS.map(a=>[a.id,a]));
 
-// ---- style colors for splats ----
-const SPLAT_COLOR = {
-  melee: 0xff6a6a,   // red
-  ranged:0x7ed957,   // green
-  mage:  0x6fb9ff,   // blue
-  zero:  0x7fa7cc    // blue-grey for 0s
-};
+// ---- style colors for splats / anims ----
+const SPLAT_COLOR = { melee:0xff6a6a, ranged:0x7ed957, mage:0x6fb9ff, zero:0x7fa7cc };
 
 // ---- runtime ----
 let s, ui={}, tickEvent=null, tickCount=0, duelActive=false, duelEnded=false, pendingKO=null;
 let startupOpen = true;     // gate interactions until startup panel closed
 let PERSIST_LOOT = true;    // user toggle at startup
 
-// ---- inventory (now quantities) ----
-// structure: { mains:{[id]:count}, specs:{[id]:count} }
-let inventory = loadInventory();
-let nextEquipOverride = { mainId:null, specId:null }; // if set, will CONSUME 1 copy at round start
+// ---- inventory (quantities) ----
+let inventory = loadInventory();  // { mains:{}, specs:{} }
+let nextEquipOverride = { mainId:null, specId:null }; // consumes 1 at round start
 
 function emptyInv(){ return {mains:{}, specs:{}}; }
-
 function loadInventory(){
   try{
     const raw=localStorage.getItem('pvp_inventory');
     if(!raw) return emptyInv();
     const o=JSON.parse(raw);
-    // migration: arrays -> counts of 1
-    if(Array.isArray(o.mains) || Array.isArray(o.specs)){
+    if(Array.isArray(o.mains) || Array.isArray(o.specs)){ // migrate old save
       const mains={}, specs={};
       (o.mains||[]).forEach(id=>{ mains[id]=(mains[id]||0)+1; });
       (o.specs||[]).forEach(id=>{ specs[id]=(specs[id]||0)+1; });
       return {mains, specs};
     }
-    // normal path
     return {mains:o.mains||{}, specs:o.specs||{}};
   }catch(e){ return emptyInv(); }
 }
-function saveInventory(){
-  if(!PERSIST_LOOT) return; // session-only mode
-  try{ localStorage.setItem('pvp_inventory', JSON.stringify(inventory)); }catch(e){}
-}
-function clearSavedInventory(){
-  try{ localStorage.removeItem('pvp_inventory'); }catch(e){}
-}
-
-function invAdd(kind,id,count=1){
-  const bag = kind==='main'?inventory.mains:inventory.specs;
-  bag[id]=(bag[id]||0)+count;
-  saveInventory();
-}
-function invHas(kind,id,count=1){
-  const bag = kind==='main'?inventory.mains:inventory.specs;
-  return (bag[id]||0) >= count;
-}
-function invConsume(kind,id,count=1){
-  const bag = kind==='main'?inventory.mains:inventory.specs;
-  if((bag[id]||0) < count) return false;
-  bag[id]-=count;
-  if(bag[id]<=0) delete bag[id];
-  saveInventory();
-  return true;
-}
-function invTotals(){
-  const tot=(obj)=>Object.values(obj).reduce((a,b)=>a+b,0);
-  return {mains:tot(inventory.mains), specs:tot(inventory.specs)};
-}
+function saveInventory(){ if(!PERSIST_LOOT) return; try{ localStorage.setItem('pvp_inventory', JSON.stringify(inventory)); }catch(e){} }
+function clearSavedInventory(){ try{ localStorage.removeItem('pvp_inventory'); }catch(e){} }
+function invAdd(kind,id,count=1){ const bag=kind==='main'?inventory.mains:inventory.specs; bag[id]=(bag[id]||0)+count; saveInventory(); }
+function invHas(kind,id,count=1){ const bag=kind==='main'?inventory.mains:inventory.specs; return (bag[id]||0)>=count; }
+function invConsume(kind,id,count=1){ const bag=kind==='main'?inventory.mains:inventory.specs; if((bag[id]||0)<count) return false; bag[id]-=count; if(bag[id]<=0) delete bag[id]; saveInventory(); return true; }
+function invTotals(){ const tot=o=>Object.values(o).reduce((a,b)=>a+b,0); return {mains:tot(inventory.mains), specs:tot(inventory.specs)}; }
 
 function preload(){}
 
@@ -163,9 +132,9 @@ function create(){
   styleReadableText(s.add.text(W/2,22,'RuneScape-Style PvP (Offline)',{font:'18px Arial',color:'#fff'}).setOrigin(0.5));
   s.add.rectangle(W/2,H*0.52,W*0.72,2,0x2a3a55);
 
-  const leftX=W*0.28,rightX=W*0.72,y=H*0.45;
-  const p=makeFighter({name:'You',x:leftX,y,color:0x66ccff,outline:0x003355});
-  const e=makeFighter({name:'Bot', x:rightX,y,color:0xff8888,outline:0x4b1b1b});
+  const leftX=W*0.28,rightX=W*0.72;
+  const p=makeFighter({name:'You',x:leftX,y:H*0.45,color:0x66ccff,outline:0x003355});
+  const e=makeFighter({name:'Bot', x:rightX,y:H*0.45,color:0xff8888,outline:0x4b1b1b});
   s.player=p; s.enemy=e;
 
   p.nameText=styleReadableText(s.add.text(p.x,p.y-86,`${p.name}`,{font:'12px Arial',color:'#d6e8ff'}).setOrigin(0.5));
@@ -178,13 +147,11 @@ function create(){
   e.armourTxt=styleReadableText(s.add.text(e.x,e.y-58,'',{font:'10px Arial',color:'#ffd6d6'}).setOrigin(0.5));
 
   const HUD_Y = H - 190;
-
   ui.status=styleReadableText(s.add.text(W/2,HUD_Y,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5));
   ui.invTxt=styleReadableText(s.add.text(W/2,HUD_Y+18,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5));
   ui.invTxt.setInteractive({useHandCursor:true});
   ui.invTxt.on('pointerdown', ()=>{ if(!duelActive && !startupOpen) inv_show(); });
 
-  // Buttons
   ui.rerollBtn=button(W/2-120,HUD_Y+52,144,38,'Reroll Loadouts',()=>{
     if(duelActive || startupOpen) return;
     rollBothLoadouts(); refreshLoadoutTexts();
@@ -197,7 +164,7 @@ function create(){
 
   buildLootPanel();
   buildInventoryPanel();
-  buildStartupPanel();     // << Startup modal
+  buildStartupPanel(); // startup modal
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
@@ -213,7 +180,9 @@ function makeFighter(o){
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
     armour:null
   };
-  f.body=s.add.circle(f.x,f.y,18,o.color).setStrokeStyle(3,o.outline);
+
+  // stick-figure body (container)
+  f.body = buildStickFigure(f.x, f.y, o.color, o.outline);
 
   const barW=110;
   f.hpBg=s.add.rectangle(f.x,f.y-44,barW,10,0x2b2b2b).setStrokeStyle(2,0x161616).setOrigin(0.5);
@@ -237,8 +206,7 @@ function button(x,y,w,h,label,onClick){
   bg.on('pointerdown',()=>{ bg.setScale(0.98); onClick&&onClick(); });
   bg.on('pointerup',()=>bg.setScale(1));
   bg.on('pointerout',()=>bg.setScale(1));
-  bg.setLabel=t=>txt.setText(t);
-  return bg;
+  bg.setLabel=t=>txt.setText(t); return bg;
 }
 function smallButton(x,y,w,h,label,onClick){
   const bg=s.add.rectangle(x,y,w,h,0x23324a).setStrokeStyle(2,0x152033).setOrigin(0.5).setInteractive({useHandCursor:true});
@@ -247,10 +215,8 @@ function smallButton(x,y,w,h,label,onClick){
   bg.on('pointerup',()=>bg.setScale(1));
   bg.on('pointerout',()=>bg.setScale(1));
   bg.setActiveState=armed=>{ bg.setStrokeStyle(2,armed?0x6fd1ff:0x152033); txt.setColor(armed?'#fff':'#d6e8ff'); };
-  bg._txt=txt;
-  return bg;
+  bg._txt=txt; return bg;
 }
-
 function panelButton(parent, x, y, w, h, label, onClick){
   const bg = s.add.rectangle(x, y, w, h, 0x2a2f45).setStrokeStyle(2, 0x151826).setOrigin(0.5);
   const txt = styleReadableText(s.add.text(x, y, label, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5));
@@ -270,29 +236,20 @@ const weaponStyle = w => w?.style || 'melee';
 function rollArmourFor(f){
   const st = weaponStyle(f.mainWeapon);
   const poolMatch = ARMOUR_SETS.filter(a=>a.affinity===st);
-  const poolAny   = ARMOUR_SETS;
-  f.armour = (Math.random()<0.6 && poolMatch.length ? pickRandom(poolMatch) : pickRandom(poolAny));
+  f.armour = (Math.random()<0.6 && poolMatch.length ? pickRandom(poolMatch) : pickRandom(ARMOUR_SETS));
 }
-
 function rollLoadout(f){
-  // Apply *consumable* equips for the player if requested
   if(f===s.player && nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)){
     f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
-    invConsume('main', nextEquipOverride.mainId, 1); // consume 1 copy
-  }else{
-    f.mainWeapon = pickRandom(MAIN_WEAPONS);
-  }
+    invConsume('main', nextEquipOverride.mainId, 1);
+  }else f.mainWeapon = pickRandom(MAIN_WEAPONS);
 
   if(f===s.player && nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)){
     f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
-    invConsume('spec', nextEquipOverride.specId, 1); // consume 1 copy
-  }else{
-    f.specWeapon = pickRandom(SPEC_WEAPONS);
-  }
+    invConsume('spec', nextEquipOverride.specId, 1);
+  }else f.specWeapon = pickRandom(SPEC_WEAPONS);
 
-  // When consumed, clear the override (single-use equip lock-in)
   if(f===s.player){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
-
   rollArmourFor(f);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
@@ -311,7 +268,7 @@ function invLabel(){ const t=invTotals(); return `Loot: Mains ${t.mains} | Specs
 
 function startDuel(){
   if(startupOpen) return;
-  const hintEl = document.getElementById('hint'); if(hintEl) hintEl.style.display='none';
+  const hintEl=document.getElementById('hint'); if(hintEl) hintEl.style.display='none';
   if(duelActive) return;
   duelActive=true; duelEnded=false; pendingKO=null;
   ui.status.setText('Fight!'); ui.startBtn.setVisible(false); ui.rematchBtn.setVisible(false);
@@ -325,17 +282,10 @@ function startDuel(){
   if(tickEvent) tickEvent.remove(false);
   tickEvent=s.time.addEvent({delay:TICK_MS,loop:true,callback:onTick});
 }
-
 function onTick(){
-  if(!duelActive || duelEnded) return;
-  tickCount++;
-
+  if(!duelActive || duelEnded) return; tickCount++;
   const p=s.player,e=s.enemy;
-  if(!p.alive || !e.alive || pendingKO){
-    if(pendingKO) finalizeKO();
-    else safeEnd(p.alive?p:e, p.alive?e:p);
-    return;
-  }
+  if(!p.alive || !e.alive || pendingKO){ if(pendingKO) finalizeKO(); else safeEnd(p.alive?p:e, p.alive?e:p); return; }
 
   regenSpec(p); regenSpec(e);
   if(p.specCooldown>0) p.specCooldown--;
@@ -347,37 +297,21 @@ function onTick(){
     const fired=tryFireSpecialOnTick(p,e);
     if(!fired && !pendingKO){ doSwing(p,e); if(!pendingKO) p.nextAttack=p.mainWeapon.speedTicks; }
   }
-
   if(e.nextAttack<=0 && e.alive && !pendingKO){
     if(!e.wantSpec && canSpec(e)){ const want=(p.hp<=45)?0.7:0.25; if(Math.random()<want){ e.wantSpec=true; e.armedSpecTick=tickCount; } }
     const fired=tryFireSpecialOnTick(e,p);
     if(!fired && !pendingKO){ doSwing(e,p); if(!pendingKO) e.nextAttack=e.mainWeapon.speedTicks; }
   }
-
   if(pendingKO) finalizeKO();
 }
-
-function finalizeKO(){
-  if(!pendingKO) return;
-  const {winner,loser}=pendingKO; pendingKO=null;
-  safeEnd(winner,loser);
-}
-
-function stopDuel(){
-  if(!duelActive) return;
-  duelActive=false;
-  if(tickEvent){ try{tickEvent.remove(false);}catch{} tickEvent=null; }
-  ui.rematchBtn.setVisible(true);
-}
-
+function finalizeKO(){ if(!pendingKO) return; const {winner,loser}=pendingKO; pendingKO=null; safeEnd(winner,loser); }
+function stopDuel(){ if(!duelActive) return; duelActive=false; if(tickEvent){try{tickEvent.remove(false);}catch{} tickEvent=null;} ui.rematchBtn.setVisible(true); }
 function safeEnd(winner, loser){
-  if(duelEnded) return;
-  duelEnded=true; duelActive=false;
+  if(duelEnded) return; duelEnded=true; duelActive=false;
   if(tickEvent){ try{tickEvent.remove(false);}catch{} tickEvent=null; }
-
+  sf_poseDead(loser);
   ui.status.setText(`${(winner?.name)||'Winner'} wins!`);
   ui.rematchBtn.setVisible(true);
-
   if(SHOW_LOOT && winner===s.player){
     const mainId=s.enemy.mainWeapon?.id, specId=s.enemy.specWeapon?.id;
     s.time.delayedCall(40, ()=>loot_show(mainId, specId));
@@ -398,7 +332,7 @@ function resetFighter(f){
   f.hp=f.maxHp; f.alive=true;
   f.food=FOOD_START; f.lastEatTick=-999;
   f.spec=SPEC_MAX; f.wantSpec=false; f.armedSpecTick=-1; f.specCooldown=0; f.lastSpecTick=-999;
-  f.nextAttack=0; f.body.setAlpha(1).setScale(1);
+  f.nextAttack=0; f.body.setAlpha(1).setScale(1).setAngle(0);
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
 }
 
@@ -416,7 +350,7 @@ function canSpec(f){ return f.spec>=f.specWeapon.cost && f.specCooldown<=0; }
 function tryFireSpecialOnTick(a,d){
   if(duelEnded||pendingKO) return false;
   if(!a.wantSpec) return false;
-  if(a.armedSpecTick===-1 || tickCount<=a.armedSpecTick) return false; // must wait 1 full tick
+  if(a.armedSpecTick===-1 || tickCount<=a.armedSpecTick) return false;
   if(!canSpec(a)) return false;
 
   performSpecial(a,d);
@@ -425,7 +359,7 @@ function tryFireSpecialOnTick(a,d){
   return true;
 }
 
-/* ================= Attack math helpers (armour-aware) ================= */
+/* ================= Attack math (armour-aware) ================= */
 
 function offensiveBonus(attacker){
   const a = attacker.armour, st = weaponStyle(attacker.mainWeapon);
@@ -438,7 +372,7 @@ function defensiveDebuff(defender, incomingStyle){
   if(!a) return {acc:0, dmg:1};
   const vs = (a.def && a.def[incomingStyle]) || null;
   if(!vs) return {acc:0, dmg:1};
-  return {acc:vs.acc, dmg:1+vs.dmg}; // <=1 usually
+  return {acc:vs.acc, dmg:1+vs.dmg};
 }
 function computeAttack(attacker, defender, accBonus=0, dmgMult=1){
   const style = weaponStyle(attacker.mainWeapon);
@@ -459,36 +393,30 @@ function doSwing(attacker,defender,accBonus=0,dmgMult=1){
   const hit = Math.random()<hitChance;
   const dmg = hit ? Phaser.Math.Between(0, Math.max(0,max)) : 0;
 
-  swipeFx(attacker,defender);
+  swipeFx(attacker,defender);                    // new style-aware animation
   hitsplatFx(defender, [dmg], style);
   applyDamage(defender, dmg);
 }
-
-function doMultiSwing(attacker,defender,parts){ // parts: [{accBonus, dmgMult}, ...]
+function doMultiSwing(attacker,defender,parts){
   if(duelEnded||pendingKO||!attacker.alive||!defender.alive) return;
-
-  const damages=[];
-  let style = weaponStyle(attacker.mainWeapon);
+  const damages=[]; let style = weaponStyle(attacker.mainWeapon);
   for(const p of parts){
     const calc = computeAttack(attacker,defender,p.accBonus||0,p.dmgMult||1);
     const hit = Math.random()<calc.hitChance;
     damages.push(hit ? Phaser.Math.Between(0, Math.max(0,calc.max)) : 0);
     style = calc.style;
   }
-
   swipeFx(attacker,defender);
   hitsplatFx(defender, damages, style);
-
   const total = damages.reduce((a,b)=>a+b,0);
   applyDamage(defender, total);
 }
-
 function applyDamage(defender, total){
   const lethal = (total>=defender.hp);
-
   if(total>0){
     defender.hp = Math.max(0, defender.hp - total);
     updateHpUI(defender);
+    sf_poseHit(defender); // react
     if(lethal){
       defender.alive=false;
       if(KO_ANIM) deathFx(defender);
@@ -511,19 +439,24 @@ function performSpecial(a,d){
 
   if(spec==='dds'){
     doMultiSwing(a,d,[{accBonus:0.15,dmgMult:1.15},{accBonus:0.15,dmgMult:1.15}]);
+    sf_specFx('dds',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 1; a.specCooldown=3; ui.status.setText(`${a.name} uses Double Stab!`);
   }else if(spec==='claws'){
     const parts=[0.4,0.3,0.2,0.1].map(p=>({accBonus:0.10,dmgMult:p*1.8}));
     doMultiSwing(a,d,parts);
+    sf_specFx('claws',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} unleashes Claw Flurry!`);
   }else if(spec==='ags'){
     doSwing(a,d,0.15,1.5);
+    sf_specFx('ags',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} smashes with AGS!`);
   }else if(spec==='dbow'){
     doMultiSwing(a,d,[{accBonus:0.10,dmgMult:1.25},{accBonus:0.10,dmgMult:1.25}]);
+    sf_specFx('dbow',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} fires Dark Bow!`);
   }else if(spec==='vstaff'){
     doSwing(a,d,0.2,1.8);
+    sf_specFx('vstaff',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 3; a.specCooldown=5; ui.status.setText(`${a.name} channels Volatile Blast!`);
   }
   a.lastSpecTick=tickCount;
@@ -557,8 +490,8 @@ function buildLootPanel(){
 
   cont.add([bg,title,mainTxt,specTxt]);
 
-  const takeMainBtn = panelButton(cont, -50, 24, 120, 30, 'Take Main (+1)', ()=>loot_takeMain());
-  const takeSpecBtn = panelButton(cont,  70, 24, 120, 30, 'Take Spec (+1)', ()=>loot_takeSpec());
+  panelButton(cont, -50, 24, 120, 30, 'Take Main (+1)', ()=>{ if(lootUI.currentMainId){ invAdd('main', lootUI.currentMainId, 1); ui.invTxt.setText(invLabel()); }});
+  panelButton(cont,  70, 24, 120, 30, 'Take Spec (+1)', ()=>{ if(lootUI.currentSpecId){ invAdd('spec', lootUI.currentSpecId, 1); ui.invTxt.setText(invLabel()); }});
   panelButton(cont, 160, 86,  86, 28, 'Close', ()=>loot_hide());
 
   const equipNextMain = styleReadableText(s.add.text(-160, 60, '☐ Equip main next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
@@ -572,25 +505,8 @@ function buildLootPanel(){
     currentMainId:null, currentSpecId:null, equipMain:false, equipSpec:false
   };
 
-  equipNextMain.on('pointerdown', ()=>{
-    lootUI.equipMain=!lootUI.equipMain;
-    equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round (consumes 1)');
-  });
-  equipNextSpec.on('pointerdown', ()=>{
-    lootUI.equipSpec=!lootUI.equipSpec;
-    equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round (consumes 1)');
-  });
-
-  function loot_takeMain(){
-    if(!lootUI.currentMainId) return;
-    invAdd('main', lootUI.currentMainId, 1);
-    ui.invTxt.setText(invLabel());
-  }
-  function loot_takeSpec(){
-    if(!lootUI.currentSpecId) return;
-    invAdd('spec', lootUI.currentSpecId, 1);
-    ui.invTxt.setText(invLabel());
-  }
+  equipNextMain.on('pointerdown', ()=>{ lootUI.equipMain=!lootUI.equipMain; equipNextMain.setText((lootUI.equipMain?'☑':'☐')+' Equip main next round (consumes 1)'); });
+  equipNextSpec.on('pointerdown', ()=>{ lootUI.equipSpec=!lootUI.equipSpec; equipNextSpec.setText((lootUI.equipSpec?'☑':'☐')+' Equip spec next round (consumes 1)'); });
 }
 function loot_show(mainId, specId){
   if(!SHOW_LOOT || !lootUI) return;
@@ -630,7 +546,7 @@ function buildInventoryPanel(){
   panelButton(cont, -90, -56, 44, 26, '◀', ()=>{ browse('main', -1); });
   panelButton(cont,  90, -56, 44, 26, '▶', ()=>{ browse('main', +1); });
   panelButton(cont, -90, -16, 44, 26, '◀', ()=>{ browse('spec', -1); });
-  panelButton(cont,  90, -16, 44, 26, '▶', ()=>{ browse('spec', +1); });
+  panelButton(cont,  90,  -16, 44, 26, '▶', ()=>{ browse('spec', +1); });
 
   const lockMain = styleReadableText(s.add.text(-160, 28, '☐ Equip selected main next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   const lockSpec = styleReadableText(s.add.text(-160, 48, '☐ Equip selected spec next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
@@ -655,40 +571,29 @@ function buildInventoryPanel(){
   function browse(kind, delta){
     refreshKeys();
     if(kind==='main'){
-      const L=invKeys.mains.length||1;
-      invCur.mainIdx=( (invCur.mainIdx+delta)%L + L )%L;
+      const L=invKeys.mains.length||1; invCur.mainIdx=( (invCur.mainIdx+delta)%L + L )%L;
     }else{
-      const L=invKeys.specs.length||1;
-      invCur.specIdx=( (invCur.specIdx+delta)%L + L )%L;
+      const L=invKeys.specs.length||1; invCur.specIdx=( (invCur.specIdx+delta)%L + L )%L;
     }
     inv_refreshVals();
   }
-
   function refreshKeys(){
     invKeys.mains = Object.keys(inventory.mains);
     invKeys.specs = Object.keys(inventory.specs);
     invCur.mainIdx = Math.min(invCur.mainIdx, Math.max(0, invKeys.mains.length-1));
     invCur.specIdx = Math.min(invCur.specIdx, Math.max(0, invKeys.specs.length-1));
   }
-
   function inv_refreshVals(){
     const mid = invKeys.mains[invCur.mainIdx];
     const sid = invKeys.specs[invCur.specIdx];
     invUI.mainVal.setText(mid ? `${MAIN_MAP[mid]?.name||mid}  x${inventory.mains[mid]}` : '—');
     invUI.specVal.setText(sid ? `${SPEC_MAP[sid]?.name||sid}  x${inventory.specs[sid]}` : '—');
   }
-
   invUI.refreshKeys = refreshKeys;
   invUI.refreshVals = inv_refreshVals;
-
   refreshKeys(); inv_refreshVals();
 }
-
-function inv_show(){
-  if(!invUI) return;
-  invUI.refreshKeys(); invUI.refreshVals();
-  invUI.cont.setVisible(true);
-}
+function inv_show(){ if(!invUI) return; invUI.refreshKeys(); invUI.refreshVals(); invUI.cont.setVisible(true); }
 
 /* ================= Startup modal ================= */
 
@@ -697,76 +602,130 @@ function buildStartupPanel(){
   const cont = s.add.container(cx, cy).setDepth(20);
   const bg   = s.add.rectangle(0,0, W*0.86, 230, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
   const title= styleReadableText(s.add.text(0,-86,'Welcome',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
-
   const desc1= styleReadableText(s.add.text(0,-56,'Choose how to start this session:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0.5));
-  const toggleTxt= styleReadableText(s.add.text(-160,10,'☑ Save new loot to this device',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5));
-  toggleTxt.setInteractive({useHandCursor:true});
+
+  const toggleTxt= styleReadableText(s.add.text(-160,10,'☑ Save new loot to this device',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   let saveOn=true;
   toggleTxt.on('pointerdown', ()=>{ saveOn=!saveOn; toggleTxt.setText((saveOn?'☑':'☐')+' Save new loot to this device'); });
 
   const btnCont = s.add.container(0,60);
-  const btnContinue = panelButton(btnCont,-70,0,120,34,'Continue', ()=>{
-    PERSIST_LOOT = saveOn;
-    // keep existing inventory as loaded
-    saveInventory(); // persist choice (may no-op if unchecked)
+  panelButton(btnCont,-70,0,120,34,'Continue', ()=>{
+    PERSIST_LOOT = saveOn; saveInventory();
     cont.setVisible(false); startupOpen=false;
-    ui.status.setText('Continue selected — good luck!');
-    ui.invTxt.setText(invLabel());
+    ui.status.setText('Continue selected — good luck!'); ui.invTxt.setText(invLabel());
   });
-  const btnRestart = panelButton(btnCont, 70,0,120,34,'Restart', ()=>{
-    PERSIST_LOOT = saveOn;
-    clearSavedInventory();
-    inventory = emptyInv();
-    saveInventory(); // if persist chosen, write empty; else no-op
+  panelButton(btnCont, 70,0,120,34,'Restart', ()=>{
+    PERSIST_LOOT = saveOn; clearSavedInventory(); inventory = emptyInv(); saveInventory();
     cont.setVisible(false); startupOpen=false;
-    ui.status.setText('Restarted with empty loot.');
-    ui.invTxt.setText(invLabel());
+    ui.status.setText('Restarted with empty loot.'); ui.invTxt.setText(invLabel());
   });
-  cont.add([bg,title,desc1,toggleTxt,btnCont]);
 
+  cont.add([bg,title,desc1,toggleTxt,btnCont]);
   cont.setVisible(true);
 }
 
 /* ================= FX & UI updates ================= */
 
-// One swipe beam per attack
-function swipeFx(a,d){
-  if(duelEnded||pendingKO) return;
+// ----- Stick figure builder & anims -----
+function buildStickFigure(x,y,fill=0x66ccff, outline=0x003355){
+  const c = s.add.container(x,y);
+  const headR=10, torsoH=20, legH=18, armL=16;
+
+  const head = s.add.circle(0,-(torsoH+headR), headR, fill).setStrokeStyle(2, outline);
+  const torso= s.add.rectangle(0,-torsoH/2, 6, torsoH, fill).setStrokeStyle(2, outline);
+  const armLft = s.add.rectangle(-6,-torsoH+4, armL, 4, fill).setOrigin(1,0.5).setStrokeStyle(2, outline);
+  const armRgt = s.add.rectangle( 6,-torsoH+4, armL, 4, fill).setOrigin(0,0.5).setStrokeStyle(2, outline);
+  const legLft = s.add.rectangle(-3,  2, 4, legH, fill).setOrigin(0.5,0).setStrokeStyle(2, outline);
+  const legRgt = s.add.rectangle( 3,  2, 4, legH, fill).setOrigin(0.5,0).setStrokeStyle(2, outline);
+  const weapon = s.add.rectangle(armRgt.x+armL, armRgt.y, 12, 4, 0xcccccc).setOrigin(0,0.5).setStrokeStyle(2, 0x555555);
+
+  c.add([legLft, legRgt, torso, armLft, armRgt, weapon, head]);
+  c.sf = { head, torso, armLft, armRgt, legLft, legRgt, weapon, baseFill:fill, outline };
+
+  sf_poseIdle({body:c});
+  return c;
+}
+function sf_poseIdle(f){
+  const c=f.body, p=c.sf;
+  s.tweens.add({targets:c, y:c.y, duration:800, yoyo:true, repeat:-1, ease:'sine.inOut'});
+  [p.armLft, p.armRgt].forEach(a=>a.setAngle(0));
+  p.weapon.fillColor = 0xcccccc;
+}
+function sf_poseHit(f){ const c=f.body; s.tweens.add({targets:c, x:c.x+2, yoyo:true, repeat:2, duration:40}); }
+function sf_poseDead(f){ const c=f.body; s.tweens.add({targets:c, angle:90, duration:300, ease:'quad.in'}); }
+function sf_setStyle(f, style){ const p=f.body.sf; const tint = style==='melee'?SPLAT_COLOR.melee : style==='ranged'?SPLAT_COLOR.ranged : SPLAT_COLOR.mage; p.weapon.fillColor = tint; }
+function sf_meleeSwing(a,d){
+  sf_setStyle(a, 'melee');
+  const p=a.body.sf; p.armRgt.setAngle(-60);
+  s.tweens.add({targets:p.armRgt, angle:50, duration:160, ease:'quad.out', yoyo:true, onComplete:()=>p.armRgt.setAngle(0)});
+  s.tweens.add({targets:a.body, x:a.body.x+(a.x<d.x?6:-6), duration:120, yoyo:true, ease:'quad.out'});
+}
+function sf_rangedShot(a,d){
+  sf_setStyle(a, 'ranged');
+  const p=a.body.sf; s.tweens.add({targets:p.armRgt, angle:-30, duration:120, yoyo:true});
   const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y);
-  const dist=Phaser.Math.Distance.Between(a.x,a.y,d.x,d.y)-18;
-  const swipe=s.add.rectangle(a.x,a.y,Math.max(8,dist),6,0x99ddff).setStrokeStyle(2,0xcfeaff)
-    .setOrigin(0,0.5).setRotation(ang).setAlpha(0).setScale(0,1);
-  s.tweens.add({targets:swipe,alpha:.95,scaleX:1,duration:120,ease:'quad.out',
-    onComplete:()=>s.tweens.add({targets:swipe,alpha:0,duration:140,onComplete:()=>swipe.destroy()})});
-  s.tweens.add({targets:a.body,scale:1.15,yoyo:true,duration:120});
+  const proj = s.add.rectangle(a.x, a.y-20, 10, 3, SPLAT_COLOR.ranged).setRotation(ang);
+  s.tweens.add({targets:proj, x:d.x, y:d.y-20, duration:180, ease:'quad.in', onComplete:()=>proj.destroy()});
+}
+function sf_mageCast(a,d){
+  sf_setStyle(a,'mage');
+  const p=a.body.sf; s.tweens.add({targets:[p.armLft,p.armRgt], angle:20, duration:120, yoyo:true});
+  const orb = s.add.circle(a.x, a.y-30, 6, SPLAT_COLOR.mage).setAlpha(0.9);
+  s.tweens.add({targets:orb, radius:18, alpha:0, duration:240, onComplete:()=>orb.destroy()});
+  const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y);
+  const spark = s.add.triangle(a.x, a.y-24, 0,0, 10,4, 10,-4, SPLAT_COLOR.mage).setRotation(ang);
+  s.tweens.add({targets:spark, x:d.x, y:d.y-24, duration:200, onComplete:()=>spark.destroy()});
+}
+function sf_specFx(type, a, d){
+  if(type==='dds'){
+    for(let i=0;i<2;i++){
+      const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y)+(i?0.08:-0.08);
+      const slash=s.add.rectangle(a.x,a.y, 44,4, SPLAT_COLOR.melee).setOrigin(0,0.5).setRotation(ang).setAlpha(0.9);
+      s.tweens.add({targets:slash, x:d.x, y:d.y, alpha:0, duration:180, onComplete:()=>slash.destroy()});
+    }
+  }else if(type==='claws'){
+    for(let i=0;i<4;i++){
+      const arc=s.add.arc(d.x, d.y-24, 14+i*2, 220, 320, false, SPLAT_COLOR.melee).setStrokeStyle(3, SPLAT_COLOR.melee);
+      s.tweens.add({targets:arc, alpha:0, scale:1.2, duration:260, onComplete:()=>arc.destroy()});
+    }
+  }else if(type==='ags'){
+    const boom = s.add.circle(d.x, d.y, 10, SPLAT_COLOR.melee).setAlpha(0.9);
+    s.tweens.add({targets:boom, radius:34, alpha:0, duration:260, ease:'quad.out', onComplete:()=>boom.destroy()});
+  }else if(type==='dbow'){
+    for(let i=0;i<2;i++){
+      const ang=Phaser.Math.Angle.Between(a.x,a.y,d.x,d.y)+(i?0.03:-0.03);
+      const proj = s.add.rectangle(a.x, a.y-20, 14,4, SPLAT_COLOR.ranged).setRotation(ang);
+      s.tweens.add({targets:proj, x:d.x, y:d.y-20, duration:220, onComplete:()=>proj.destroy()});
+    }
+  }else if(type==='vstaff'){
+    const ring=s.add.circle(d.x,d.y,12,SPLAT_COLOR.mage).setAlpha(0.9);
+    s.tweens.add({targets:ring, radius:40, alpha:0, duration:340, onComplete:()=>ring.destroy()});
+  }
+}
+// style-aware attack animation bridge
+function swipeFx(a,d){
+  const st = (a.mainWeapon && a.mainWeapon.style) || 'melee';
+  if(st==='melee')      sf_meleeSwing(a,d);
+  else if(st==='ranged')sf_rangedShot(a,d);
+  else                  sf_mageCast(a,d);
 }
 
-// OSRS-style hitsplats: diamonds w/ tails; multiple values rendered simultaneously
+// ----- Hitsplats / misc FX -----
 function hitsplatFx(defender, values, style='melee'){
   if(duelEnded||pendingKO) return;
   const baseX=defender.x, baseY=defender.y-30;
   const spread = 18;
   const startX = baseX - ((values.length-1)*spread)/2;
   const fill = SPLAT_COLOR[style] || SPLAT_COLOR.melee;
-
   values.forEach((v,i)=>{
-    const isZero = (v<=0);
-    const color = isZero ? SPLAT_COLOR.zero : fill;
-
-    const size = 16;
-    const x = startX + i*spread;
-    const y = baseY;
+    const isZero=(v<=0), color=isZero?SPLAT_COLOR.zero:fill, size=16, x=startX+i*spread, y=baseY;
     const diamond = s.add.rectangle(x, y, size, size, color).setAngle(45).setAlpha(0.92);
     const tail = s.add.triangle(x, y+size*0.55, x-4, y+7, x+4, y+7, x, y+13, color).setAlpha(0.92);
     const t=s.add.text(x, y, isZero?'0':`${v}`, {font:'14px Arial', color:'#ffffff'}).setOrigin(0.5).setShadow(0,1,'#000',4,true,true);
-
-    s.tweens.add({targets:[diamond,tail,t], y:'-=16', alpha:0, duration:760,
-      onComplete:()=>{ diamond.destroy(); tail.destroy(); t.destroy(); }});
-
+    s.tweens.add({targets:[diamond,tail,t], y:'-=16', alpha:0, duration:760, onComplete:()=>{ diamond.destroy(); tail.destroy(); t.destroy(); }});
     if(isZero){ s.tweens.add({targets:[diamond,tail,t], x:`+=3`, yoyo:true, repeat:3, duration:60}); }
   });
 }
-
 function eatFx(f,healed){
   if(duelEnded||pendingKO) return;
   const ring=s.add.circle(f.x,f.y,12,0x4dd06d).setAlpha(0.9);
