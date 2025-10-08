@@ -158,6 +158,12 @@ function create(){
   ui.rerollBtn=button(W/2-140,HUD_Y+52,150,38,'Reroll Loadouts',()=>{
     if(duelActive || startupOpen) return;
     rollBothLoadouts(); refreshLoadoutTexts();
+// Force player's starting loadout to Fire Surge + Dragon Dagger
+if (s && s.player && MAIN_MAP['fsurge'] && SPEC_MAP['dds']) {
+  s.player.mainWeapon = MAIN_MAP['fsurge'];
+  s.player.specWeapon = SPEC_MAP['dds'];
+  refreshLoadoutTexts();
+}
     ui.status.setText('Loadouts rolled. Ready!');
   });
   ui.specBtn   = smallButton(W/2+150,HUD_Y+52,110,36,'SPEC',togglePlayerSpec);
@@ -345,9 +351,25 @@ function safeEnd(winner, loser){
 
 function rematch(){
   resetFighter(s.player); resetFighter(s.enemy);
-  rollBothLoadouts(); refreshLoadoutTexts();
+  // Apply any equip-now overrides for the player first (consumes from loot if available)
+  if (nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)) {
+    s.player.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
+    invConsume('main', nextEquipOverride.mainId, 1);
+    nextEquipOverride.mainId = null;
+  }
+  if (nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)) {
+    s.player.specWeapon = SPEC_MAP[nextEquipOverride.specId];
+    invConsume('spec', nextEquipOverride.specId, 1);
+    nextEquipOverride.specId = null;
+  }
+  // Enemy gets a fresh roll each duel
+  rollLoadout(s.enemy);
+  // If player had nothing queued, keep their previous loadout
+  if (!s.player.mainWeapon) s.player.mainWeapon = pickRandom(MAIN_WEAPONS);
+  if (!s.player.specWeapon) s.player.specWeapon = pickRandom(SPEC_WEAPONS);
+  refreshLoadoutTexts();
   duelEnded=false; pendingKO=null;
-  ui.status.setText('Reroll loadouts, then Start Duel');
+  ui.status.setText('Ready! (enemy rerolled; your gear carried over)');
   ui.startBtn.setVisible(true); ui.rematchBtn.setVisible(false);
   ui.specBtn.setActiveState(false);
 }
