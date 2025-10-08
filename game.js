@@ -5,7 +5,7 @@
    - Start each round: 20 Sharks, 10 Karams (both sides)
    - One shark + one karam allowed per tick (combo)
    - Bot eats smarter: if it can likely KO with spec or next swing, it won't eat
-   - Startup panel (Continue/Restart + Save toggle), Updated: timestamp from game.js
+   - Startup panel (Continue/Restart + Save toggle + Bot difficulty), Updated: timestamp from game.js
 */
 
 const W=420, H=640;
@@ -38,7 +38,9 @@ function setUpdatedStampFromGameJs(){
     const scripts=[...document.getElementsByTagName('script')];
     const me=scripts.find(sc=>/game\.js(?:\?|$)/.test(sc.src));
     const src=me?me.src:'./game.js';
-    fetch(src, {method:'HEAD', cache:'no-cache'})
+    // more reliable on mobile: GET with cache-buster
+    const bust = src + (src.includes('?')?'&':'?') + 'v=' + Date.now();
+    fetch(bust, {method:'GET', cache:'no-store'})
       .then(r=>{ const lm=r.headers.get('last-modified'); const when = lm ? new Date(lm) : new Date(); el.textContent=`Updated: ${fmt(when)}`; })
       .catch(()=>{ el.textContent=`Updated: ${fmt(new Date())}`; });
   }catch(e){ el.textContent=`Updated: ${fmt(new Date())}`; }
@@ -49,13 +51,16 @@ const SHOW_LOOT = true;
 const KO_ANIM   = false;
 
 // ---- timing & balance ----
-const TICK_MS=600, BASE_ACCURACY=0.80;
+const TICK_MS=600;
+// Accuracy closer to OSRS: lower baseline a bit for more whiffs
+const BASE_ACCURACY=0.68; // was 0.80
 const SPEC_MAX=100, SPEC_REGEN_PER_TICK=2;
 
-// ---- food (new) ----
+// ---- food ----
 const SHARK_HEAL=20, KARAM_HEAL=18;
 const SHARK_START=20, KARAM_START=10;
-const EAT_THRESH=50;            // bot starts eating under this hp
+// Slightly lower for snappier KOs
+const EAT_THRESH=42;
 
 // ---- mains & specs ----
 const MAIN_WEAPONS=[
@@ -103,6 +108,15 @@ let PERSIST_LOOT = true;
 // ---- inventory (quantities) ----
 let inventory = loadInventory();  // { mains:{}, specs:{} }
 let nextEquipOverride = { mainId:null, specId:null }; // consumes 1 at round start
+
+// ---- bot difficulty ----
+const BOT_PROFILES = [
+  {key:'easy',   name:'Easy',   armour:'barrows_melee', main:'whip',  spec:'dbow', eat:50, accMod:-0.04},
+  {key:'medium', name:'Medium', armour:'evoid_r',       main:'dkn',   spec:'ags',  eat:46, accMod:+0.00},
+  {key:'hard',   name:'Hard',   armour:'torva_melee',   main:'dscim', spec:'dds',  eat:42, accMod:+0.04},
+];
+let botIdx = 0; // default Easy
+let currentBot = () => BOT_PROFILES[botIdx];
 
 function emptyInv(){ return {mains:{}, specs:{}}; }
 function loadInventory(){
@@ -172,8 +186,10 @@ function create(){
 
   buildLootPanel();
   buildInventoryPanel();
-  buildStartupPanel(); // startup modal
+  buildStartupPanel(); // startup modal with bot selector
 
+  // initial apply bot profile to enemy stats
+  applyBotProfileToEnemy();
   rollBothLoadouts(); refreshLoadoutTexts();
 }
 
@@ -187,7 +203,7 @@ function makeFighter(o){
     lastSharkTick:-999, lastKaramTick:-999,
     spec:SPEC_MAX, mainWeapon:null,specWeapon:null,nextAttack:0,
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
-    armour:null
+    armour:null, accMod:0, eatThreshold:EAT_THRESH
   };
 
   // stick-figure body (container)
@@ -249,19 +265,39 @@ function rollArmourFor(f){
   const poolMatch = ARMOUR_SETS.filter(a=>a.affinity===st);
   f.armour = (Math.random()<0.6 && poolMatch.length ? pickRandom(poolMatch) : pickRandom(ARMOUR_SETS));
 }
+// Apply bot profile (armour fixed, main/spec fixed)
+function applyBotProfileToEnemy(){
+  const prof = currentBot();
+  const e = s.enemy;
+  e.accMod = prof.accMod||0;
+  e.eatThreshold = prof.eat||EAT_THRESH;
+  e.armour = ARMOUR_MAP[prof.armour] || ARMOUR_SETS[0];
+  e.mainWeapon = MAIN_MAP[prof.main] || MAIN_WEAPONS[0];
+  e.specWeapon = SPEC_MAP[prof.spec] || SPEC_WEAPONS[0];
+}
 function rollLoadout(f){
   if(f===s.player && nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)){
     f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
     invConsume('main', nextEquipOverride.mainId, 1);
+  }else if(f===s.enemy){
+    const prof=currentBot();
+    f.mainWeapon = MAIN_MAP[prof.main];
   }else f.mainWeapon = pickRandom(MAIN_WEAPONS);
 
   if(f===s.player && nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)){
     f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
     invConsume('spec', nextEquipOverride.specId, 1);
+  }else if(f===s.enemy){
+    const prof=currentBot();
+    f.specWeapon = SPEC_MAP[prof.spec];
   }else f.specWeapon = pickRandom(SPEC_WEAPONS);
 
   if(f===s.player){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
-  rollArmourFor(f);
+  if(f===s.player) rollArmourFor(f);
+  if(f===s.enemy){
+    const prof=currentBot();
+    f.armour = ARMOUR_MAP[prof.armour];
+  }
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
 function refreshLoadoutTexts(){
@@ -274,6 +310,9 @@ function refreshLoadoutTexts(){
   ui.eatSharkBtn._txt.setText(`Eat Shark (${s.player.sharks})`);
   ui.eatKaramBtn._txt.setText(`Karam (${s.player.karams})`);
   ui.invTxt.setText(invLabel());
+  // reflect weapon style color immediately
+  sf_setStyle(p, weaponStyle(p.mainWeapon));
+  sf_setStyle(e, weaponStyle(e.mainWeapon));
 }
 function invLabel(){ const t=invTotals(); return `Loot: Mains ${t.mains} | Specs ${t.specs}`; }
 
@@ -345,6 +384,7 @@ function safeEnd(winner, loser){
 
 function rematch(){
   resetFighter(s.player); resetFighter(s.enemy);
+  applyBotProfileToEnemy();
   rollBothLoadouts(); refreshLoadoutTexts();
   duelEnded=false; pendingKO=null;
   ui.status.setText('Reroll loadouts, then Start Duel');
@@ -401,7 +441,7 @@ function computeAttack(attacker, defender, accBonus=0, dmgMult=1){
   const style = weaponStyle(attacker.mainWeapon);
   const off = offensiveBonus(attacker);
   const def = defensiveDebuff(defender, style);
-  const baseHit = BASE_ACCURACY + accBonus + off.acc + def.acc;
+  const baseHit = BASE_ACCURACY + accBonus + off.acc + def.acc + (attacker.accMod||0);
   const hitChance = Math.min(0.98, Math.max(0.02, baseHit));
   const effDmgMult = Math.max(0, dmgMult * off.dmg * def.dmg);
   const max = Math.round(attacker.mainWeapon.maxHit * effDmgMult);
@@ -526,9 +566,11 @@ function botEatLogic(bot, opponent){
   // If lethal is possible, skip eating to go for kill
   if(canKillNowWithSwing || canKillVerySoonWithSpec) return;
 
+  const eatT = bot.eatThreshold || EAT_THRESH;
+
   // Otherwise, eat under thresholds
-  const wantShark = bot.hp<=EAT_THRESH && bot.sharks>0 && bot.lastSharkTick!==tickCount;
-  const wantKaram = bot.hp<=Math.max(20, EAT_THRESH-10) && bot.karams>0 && bot.lastKaramTick!==tickCount;
+  const wantShark = bot.hp<=eatT && bot.sharks>0 && bot.lastSharkTick!==tickCount;
+  const wantKaram = bot.hp<=Math.max(20, eatT-10) && bot.karams>0 && bot.lastKaramTick!==tickCount;
 
   // Prefer shark first (takes turn), then karam if still low
   if(wantShark) eatShark(bot,'auto');
@@ -614,7 +656,7 @@ function buildInventoryPanel(){
   const lockSpec = styleReadableText(s.add.text(-160, 48, '☐ Equip selected spec next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([lockMain, lockSpec]);
 
-  // --- NEW: instant equip buttons ---
+  // Instant equip buttons
   panelButton(cont, -70, 92, 120, 28, 'Equip Main Now', ()=>{
     const mid = invKeys.mains[invCur.mainIdx];
     if(mid && invHas('main', mid)){
@@ -681,32 +723,43 @@ function buildInventoryPanel(){
 }
 function inv_show(){ if(!invUI) return; invUI.refreshKeys(); invUI.refreshVals(); invUI.cont.setVisible(true); }
 
-/* ================= Startup modal ================= */
+/* ================= Startup modal (with bot difficulty) ================= */
 
 function buildStartupPanel(){
   const cx=W/2, cy=H*0.34;
   const cont = s.add.container(cx, cy).setDepth(20);
-  const bg   = s.add.rectangle(0,0, W*0.86, 230, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
-  const title= styleReadableText(s.add.text(0,-86,'Welcome',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
-  const desc1= styleReadableText(s.add.text(0,-56,'Choose how to start this session:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0.5));
+  const bg   = s.add.rectangle(0,0, W*0.86, 260, 0x202a3a).setStrokeStyle(2,0x0f141d).setOrigin(0.5);
+  const title= styleReadableText(s.add.text(0,-92,'Welcome',{font:'18px Arial',color:'#ffffff'}).setOrigin(0.5));
+  const desc1= styleReadableText(s.add.text(0,-66,'Choose how to start this session:',{font:'13px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
-  const toggleTxt= styleReadableText(s.add.text(-160,10,'☑ Save new loot to this device',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
+  // Save toggle
+  const toggleTxt= styleReadableText(s.add.text(-160,-28,'☑ Save new loot to this device',{font:'12px Arial',color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   let saveOn=true;
   toggleTxt.on('pointerdown', ()=>{ saveOn=!saveOn; toggleTxt.setText((saveOn?'☑':'☐')+' Save new loot to this device'); });
 
-  const btnCont = s.add.container(0,60);
+  // Difficulty selector
+  const diffLbl = styleReadableText(s.add.text(-160, -4, 'Bot difficulty:', {font:'12px Arial', color:'#cfe8ff'}).setOrigin(0,0.5));
+  const diffName = styleReadableText(s.add.text(-6, -4, BOT_PROFILES[botIdx].name, {font:'14px Arial', color:'#ffffff'}).setOrigin(0,0.5));
+  const arrows = s.add.container(0,0);
+  const leftBtn  = panelButton(arrows, -36, -4, 26, 22, '◀', ()=>{ botIdx=(botIdx+BOT_PROFILES.length-1)%BOT_PROFILES.length; diffName.setText(BOT_PROFILES[botIdx].name); applyBotProfileToEnemy(); refreshLoadoutTexts(); });
+  const rightBtn = panelButton(arrows,  52, -4, 26, 22, '▶', ()=>{ botIdx=(botIdx+1)%BOT_PROFILES.length; diffName.setText(BOT_PROFILES[botIdx].name); applyBotProfileToEnemy(); refreshLoadoutTexts(); });
+  cont.add([bg,title,desc1,toggleTxt,diffLbl,diffName,arrows]);
+
+  const btnCont = s.add.container(0,70);
   panelButton(btnCont,-70,0,120,34,'Continue', ()=>{
     PERSIST_LOOT = saveOn; saveInventory();
     cont.setVisible(false); startupOpen=false;
-    ui.status.setText('Continue selected — good luck!'); ui.invTxt.setText(invLabel());
+    ui.status.setText(`Continue — Bot: ${BOT_PROFILES[botIdx].name}`); ui.invTxt.setText(invLabel());
+    applyBotProfileToEnemy(); refreshLoadoutTexts();
   });
   panelButton(btnCont, 70,0,120,34,'Restart', ()=>{
     PERSIST_LOOT = saveOn; clearSavedInventory(); inventory = emptyInv(); saveInventory();
     cont.setVisible(false); startupOpen=false;
-    ui.status.setText('Restarted with empty loot.'); ui.invTxt.setText(invLabel());
+    ui.status.setText(`Restarted (Bot: ${BOT_PROFILES[botIdx].name}).`); ui.invTxt.setText(invLabel());
+    applyBotProfileToEnemy(); refreshLoadoutTexts();
   });
 
-  cont.add([bg,title,desc1,toggleTxt,btnCont]); cont.setVisible(true);
+  cont.add([btnCont]); cont.setVisible(true);
 }
 
 /* ================= FX & UI updates (stick figures & hitsplats) ================= */
