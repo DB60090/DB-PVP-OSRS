@@ -104,6 +104,8 @@ let PERSIST_LOOT = true;
 let inventory = loadInventory();  // { mains:{}, specs:{} }
 let nextEquipOverride = { mainId:null, specId:null }; // consumes 1 at round start
 
+let firstBoot = true; // ensure first match starts with Fire Surge + Dragon Dagger
+
 function emptyInv(){ return {mains:{}, specs:{}}; }
 function loadInventory(){
   try{
@@ -153,7 +155,7 @@ function create(){
   ui.status=styleReadableText(s.add.text(W/2,HUD_Y,'Reroll loadouts, then Start Duel',{font:'14px Arial',color:'#9fdcff'}).setOrigin(0.5));
   ui.invTxt=styleReadableText(s.add.text(W/2,HUD_Y+18,invLabel(),{font:'11px Arial',color:'#a8c8ff'}).setOrigin(0.5));
   ui.invTxt.setInteractive({useHandCursor:true});
-  ui.invTxt.on('pointerdown', ()=>{ if(!startupOpen) inv_show(); });
+  ui.invTxt.on('pointerdown', ()=>{ if(!duelActive && !startupOpen) inv_show(); });
 
   ui.rerollBtn=button(W/2-140,HUD_Y+52,150,38,'Reroll Loadouts',()=>{
     if(duelActive || startupOpen) return;
@@ -170,9 +172,7 @@ function create(){
   ui.rematchBtn= button(W/2,HUD_Y+140,190,46,'Rematch',()=>rematch());
   ui.rematchBtn.setVisible(false);
 
-  buildLootPanel();
-  buildInventoryPanel();
-  buildStartupPanel(); // startup modal
+  burollBothLoadouts(); refreshLoadoutTexts(); firstBoot=false; buildStartupPanel(); // startup modal
 
   rollBothLoadouts(); refreshLoadoutTexts();
 }
@@ -250,28 +250,36 @@ function rollArmourFor(f){
   f.armour = (Math.random()<0.6 && poolMatch.length ? pickRandom(poolMatch) : pickRandom(ARMOUR_SETS));
 }
 function rollLoadout(f){
-  if(f===s.player && nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)){
-    f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
-    invConsume('main', nextEquipOverride.mainId, 1);
-  }else f.mainWeapon = pickRandom(MAIN_WEAPONS);
+  // Player: honor queued equips first; otherwise on first boot force Fire Surge + Dragon Dagger
+  if(f===s.player){
+    if(nextEquipOverride.mainId && invHas('main', nextEquipOverride.mainId)){
+      f.mainWeapon = MAIN_MAP[nextEquipOverride.mainId];
+      invConsume('main', nextEquipOverride.mainId, 1);
+    }else if(firstBoot){
+      f.mainWeapon = MAIN_MAP['fsurge'];
+    }else{
+      f.mainWeapon = pickRandom(MAIN_WEAPONS);
+    }
 
-  if(f===s.player && nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)){
-    f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
-    invConsume('spec', nextEquipOverride.specId, 1);
-  }else f.specWeapon = pickRandom(SPEC_WEAPONS);
+    if(nextEquipOverride.specId && invHas('spec', nextEquipOverride.specId)){
+      f.specWeapon = SPEC_MAP[nextEquipOverride.specId];
+      invConsume('spec', nextEquipOverride.specId, 1);
+    }else if(firstBoot){
+      f.specWeapon = SPEC_MAP['dds'];
+    }else{
+      f.specWeapon = pickRandom(SPEC_WEAPONS);
+    }
 
-  if(f===s.player){ nextEquipOverride.mainId=null; nextEquipOverride.specId=null; }
+    nextEquipOverride.mainId=null; nextEquipOverride.specId=null;
+  }else{
+    // Enemy always random
+    f.mainWeapon = pickRandom(MAIN_WEAPONS);
+    f.specWeapon = pickRandom(SPEC_WEAPONS);
+  }
   rollArmourFor(f);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
-function refreshLoadoutTexts(){
-  const p=s.player,e=s.enemy;
-  p.loadoutTxt.setText(`Main: ${p.mainWeapon.name}  |  Spec: ${p.specWeapon.name}`);
-  e.loadoutTxt.setText(`Main: ${e.mainWeapon.name}  |  Spec: ${e.specWeapon.name}`);
-  p.armourTxt.setText(`Arm: ${p.armour?.name||'—'} (${p.armour?.affinity||'—'})`);
-  e.armourTxt.setText(`Arm: ${e.armour?.name||'—'} (${e.armour?.affinity||'—'})`);
-  ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
-  ui.eatSharkBtn._txt.setText(`Eat Shark (${s.player.sharks})`);
+ark (${s.player.sharks})`);
   ui.eatKaramBtn._txt.setText(`Karam (${s.player.karams})`);
   ui.invTxt.setText(invLabel());
 }
@@ -613,31 +621,6 @@ function buildInventoryPanel(){
   const lockMain = styleReadableText(s.add.text(-160, 28, '☐ Equip selected main next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   const lockSpec = styleReadableText(s.add.text(-160, 48, '☐ Equip selected spec next round (consumes 1)', {font:'12px Arial', color:'#9fdcff'}).setOrigin(0,0.5)).setInteractive({useHandCursor:true});
   cont.add([lockMain, lockSpec]);
-
-  // --- NEW: instant equip buttons ---
-  panelButton(cont, -70, 92, 120, 28, 'Equip Main Now', ()=>{
-    const mid = invKeys.mains[invCur.mainIdx];
-    if(mid && invHas('main', mid)){
-      s.player.mainWeapon = MAIN_MAP[mid];
-      invConsume('main', mid, 1);
-      rollArmourFor(s.player);
-      refreshLoadoutTexts();
-      inv_refreshVals();
-      ui.invTxt.setText(invLabel());
-      ui.status.setText(`Equipped ${MAIN_MAP[mid].name} immediately.`);
-    }
-  });
-  panelButton(cont,  70, 92, 120, 28, 'Equip Spec Now', ()=>{
-    const sid = invKeys.specs[invCur.specIdx];
-    if(sid && invHas('spec', sid)){
-      s.player.specWeapon = SPEC_MAP[sid];
-      invConsume('spec', sid, 1);
-      refreshLoadoutTexts();
-      inv_refreshVals();
-      ui.invTxt.setText(invLabel());
-      ui.status.setText(`Equipped ${SPEC_MAP[sid].name} immediately.`);
-    }
-  });
 
   let lockM=false, lockS=false;
   lockMain.on('pointerdown', ()=>{ lockM=!lockM; lockMain.setText((lockM?'☑':'☐')+' Equip selected main next round (consumes 1)'); });
