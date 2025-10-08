@@ -279,10 +279,18 @@ function rollLoadout(f){
   rollArmourFor(f);
 }
 function rollBothLoadouts(){ rollLoadout(s.player); rollLoadout(s.enemy); }
-ark (${s.player.sharks})`);
+function refreshLoadoutTexts(){
+  const p=s.player,e=s.enemy;
+  p.loadoutTxt.setText(`Main: ${p.mainWeapon.name}  |  Spec: ${p.specWeapon.name}`);
+  e.loadoutTxt.setText(`Main: ${e.mainWeapon.name}  |  Spec: ${e.specWeapon.name}`);
+  p.armourTxt.setText(`Arm: ${p.armour?.name||'—'} (${p.armour?.affinity||'—'})`);
+  e.armourTxt.setText(`Arm: ${e.armour?.name||'—'} (${e.armour?.affinity||'—'})`);
+  ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
+  ui.eatSharkBtn._txt.setText(`Eat Shark (${s.player.sharks})`);
   ui.eatKaramBtn._txt.setText(`Karam (${s.player.karams})`);
   ui.invTxt.setText(invLabel());
 }
+
 function invLabel(){ const t=invTotals(); return `Loot: Mains ${t.mains} | Specs ${t.specs}`; }
 
 /* ================= Combat control ================= */
