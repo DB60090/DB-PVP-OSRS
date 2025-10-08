@@ -1,9 +1,10 @@
-/* PvP (offline) — iPhone + Food + Tick Specials + Random Loadouts + Loot + Inventory (consumable)
-   + Armour + OSRS hitsplats + Stick-figure fighters & anims
-   - Startup panel: Continue/Restart + "Save new loot to this device"
-   - Inventory stores quantities; equipping from loot CONSUMES 1 at round start
-   - Layout tuned for mobile: no overlaps; hitsplats above head
-   - "Updated:" reads game.js Last-Modified (fallback to now)
+/* PvP (offline) — iPhone + Food (Shark/Karam) + Tick Specials + Random Loadouts
+   + Loot (consumable) + Inventory + Armour + OSRS hitsplats + Stick-figure anims
+   - Shark (20 heal) = instant but TAKES TURN (resets next attack by weapon speed)
+   - Karam (18 heal) = instant and DOESN'T take turn
+   - Start each round: 20 Sharks, 10 Karams (both sides)
+   - One shark + one karam allowed per tick (combo); no double of same food on a tick
+   - Startup panel (Continue/Restart + Save toggle), Updated: timestamp from game.js
 */
 
 const W=420, H=640;
@@ -22,7 +23,7 @@ const UI = {
   hpDy     : -86,   // HP ABOVE head
   foodDy   : -28,   // below body
   specDy   : -14,   // below body
-  hitsplatDy: -106, // well above head (never overlaps bars)
+  hitsplatDy: -106, // above head
   arenaY   : H*0.44 // fighter baseline
 };
 
@@ -49,23 +50,24 @@ function setUpdatedStampFromGameJs(){
 }
 
 // ---- toggles ----
-const SHOW_LOOT = true;  // set false to disable loot popup entirely
-const KO_ANIM   = false; // death tween off for Safari stability
+const SHOW_LOOT = true;
+const KO_ANIM   = false;
 
 // ---- timing & balance ----
 const TICK_MS=600, BASE_ACCURACY=0.80;
-const EAT_AT_HP=50, FOOD_HEAL=20, FOOD_START=10, EAT_COST_TK=1;
 const SPEC_MAX=100, SPEC_REGEN_PER_TICK=2;
+
+// ---- food (new) ----
+const SHARK_HEAL=20, KARAM_HEAL=18;
+const SHARK_START=20, KARAM_START=10;
+const EAT_THRESH=50;            // bot starts eating under this hp
 
 // ---- mains & specs ----
 const MAIN_WEAPONS=[
-  // Melee
   {id:'dscim', name:'Dragon Scimitar', speedTicks:5, maxHit:48, style:'melee'},
   {id:'whip',  name:'Abyssal Whip',    speedTicks:4, maxHit:42, style:'melee'},
-  // Ranged
   {id:'msb',   name:'Magic Shortbow',  speedTicks:5, maxHit:40, style:'ranged'},
   {id:'dkn',   name:'Dragon Knives',   speedTicks:3, maxHit:25, style:'ranged'},
-  // Magic
   {id:'fsurge',name:'Fire Surge',      speedTicks:5, maxHit:48, style:'mage'},
   {id:'iblitz',name:'Ice Blitz',       speedTicks:5, maxHit:44, style:'mage'},
 ];
@@ -113,7 +115,7 @@ function loadInventory(){
     const raw=localStorage.getItem('pvp_inventory');
     if(!raw) return emptyInv();
     const o=JSON.parse(raw);
-    if(Array.isArray(o.mains) || Array.isArray(o.specs)){ // migrate old save
+    if(Array.isArray(o.mains) || Array.isArray(o.specs)){
       const mains={}, specs={};
       (o.mains||[]).forEach(id=>{ mains[id]=(mains[id]||0)+1; });
       (o.specs||[]).forEach(id=>{ specs[id]=(specs[id]||0)+1; });
@@ -158,14 +160,23 @@ function create(){
   ui.invTxt.setInteractive({useHandCursor:true});
   ui.invTxt.on('pointerdown', ()=>{ if(!duelActive && !startupOpen) inv_show(); });
 
-  ui.rerollBtn=button(W/2-120,HUD_Y+52,144,38,'Reroll Loadouts',()=>{
+  ui.rerollBtn=button(W/2-140,HUD_Y+52,150,38,'Reroll Loadouts',()=>{
     if(duelActive || startupOpen) return;
     rollBothLoadouts(); refreshLoadoutTexts();
     ui.status.setText('Loadouts rolled. Ready!');
   });
-  ui.specBtn   = smallButton(W/2+138,HUD_Y+52,116,38,'SPEC',togglePlayerSpec);
-  ui.startBtn  = button(W/2,HUD_Y+94,190,46,'Start Duel',()=>startDuel());
-  ui.rematchBtn= button(W/2,HUD_Y+94,190,46,'Rematch',()=>rematch());
+  ui.specBtn   = smallButton(W/2+150,HUD_Y+52,110,36,'SPEC',togglePlayerSpec);
+
+  // NEW: manual eat buttons
+  ui.eatSharkBtn = smallButton(W/2-90,HUD_Y+94,120,46,'Eat Shark (20)', ()=>{
+    eatShark(s.player,'manual');
+  });
+  ui.eatKaramBtn = smallButton(W/2+90,HUD_Y+94,120,46,'Karam (10)', ()=>{
+    eatKaram(s.player,'manual');
+  });
+
+  ui.startBtn  = button(W/2,HUD_Y+140,190,46,'Start Duel',()=>startDuel());
+  ui.rematchBtn= button(W/2,HUD_Y+140,190,46,'Rematch',()=>rematch());
   ui.rematchBtn.setVisible(false);
 
   buildLootPanel();
@@ -181,8 +192,11 @@ function styleReadableText(txt){ txt.setShadow(0,1,'#000',4,true,true); return t
 
 function makeFighter(o){
   const f={name:o.name,x:o.x,y:o.y,hp:99,maxHp:99,alive:true,
-    food:FOOD_START,lastEatTick:-999,spec:SPEC_MAX,
-    mainWeapon:null,specWeapon:null,nextAttack:0,
+    // food system
+    sharks:SHARK_START, karams:KARAM_START,
+    lastSharkTick:-999, lastKaramTick:-999,
+    // spec & combat
+    spec:SPEC_MAX, mainWeapon:null,specWeapon:null,nextAttack:0,
     wantSpec:false,armedSpecTick:-1,specCooldown:0,lastSpecTick:-999,
     armour:null
   };
@@ -196,11 +210,11 @@ function makeFighter(o){
   f.hpFill=s.add.rectangle(f.x-barW/2,f.y+UI.hpDy,barW,8,0x4dd06d).setOrigin(0,0.5);
   f.hpText=styleReadableText(s.add.text(f.x,f.y+UI.hpDy,'',{font:'11px Arial',color:'#fff'}).setOrigin(0.5));
 
-  // Food/spec below body with extra space
-  f.foodBg=s.add.rectangle(f.x,f.y+UI.foodDy,64,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
-  f.foodTxt=styleReadableText(s.add.text(f.x,f.y+UI.foodDy,`Food: ${f.food}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
+  // Food/spec below body
+  f.foodBg=s.add.rectangle(f.x,f.y+UI.foodDy,124,14,0x1f2a3a).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.foodTxt=styleReadableText(s.add.text(f.x,f.y+UI.foodDy,`Shark ${f.sharks} | Karam ${f.karams}`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
-  f.specBg=s.add.rectangle(f.x,f.y+UI.specDy,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0.5);
+  f.specBg=s.add.rectangle(f.x,f.y+UI.specDy,110,6,0x101621).setStrokeStyle(1,0x0e141c).setOrigin(0,0.5);
   f.specFill=s.add.rectangle(f.x-55,f.y+UI.specDy,110,4,0x6fd1ff).setOrigin(0,0.5);
   f.specTxt=styleReadableText(s.add.text(f.x,f.y+UI.specDy+14,`Spec ${f.spec}%`,{font:'10px Arial',color:'#cfe8ff'}).setOrigin(0.5));
 
@@ -268,6 +282,8 @@ function refreshLoadoutTexts(){
   p.armourTxt.setText(`Arm: ${p.armour?.name||'—'} (${p.armour?.affinity||'—'})`);
   e.armourTxt.setText(`Arm: ${e.armour?.name||'—'} (${e.armour?.affinity||'—'})`);
   ui.specBtn._txt.setText(`SPEC (${p.specWeapon.name})`);
+  ui.eatSharkBtn._txt.setText(`Eat Shark (${s.player.sharks})`);
+  ui.eatKaramBtn._txt.setText(`Karam (${s.player.karams})`);
   ui.invTxt.setText(invLabel());
 }
 function invLabel(){ const t=invTotals(); return `Loot: Mains ${t.mains} | Specs ${t.specs}`; }
@@ -290,14 +306,22 @@ function startDuel(){
   if(tickEvent) tickEvent.remove(false);
   tickEvent=s.time.addEvent({delay:TICK_MS,loop:true,callback:onTick});
 }
+
 function onTick(){
   if(!duelActive || duelEnded) return; tickCount++;
   const p=s.player,e=s.enemy;
-  if(!p.alive || !e.alive || pendingKO){ if(pendingKO) finalizeKO(); else safeEnd(p.alive?p:e, p.alive?e:p); return; }
+
+  if(!p.alive || !e.alive || pendingKO){
+    if(pendingKO) finalizeKO(); else safeEnd(p.alive?p:e, p.alive?e:p);
+    return;
+  }
 
   regenSpec(p); regenSpec(e);
   if(p.specCooldown>0) p.specCooldown--;
   if(e.specCooldown>0) e.specCooldown--;
+
+  // AI auto-eating (bot only)
+  botEatLogic(e, p);
 
   p.nextAttack--; e.nextAttack--;
 
@@ -310,8 +334,10 @@ function onTick(){
     const fired=tryFireSpecialOnTick(e,p);
     if(!fired && !pendingKO){ doSwing(e,p); if(!pendingKO) e.nextAttack=e.mainWeapon.speedTicks; }
   }
+
   if(pendingKO) finalizeKO();
 }
+
 function finalizeKO(){ if(!pendingKO) return; const {winner,loser}=pendingKO; pendingKO=null; safeEnd(winner,loser); }
 function stopDuel(){ if(!duelActive) return; duelActive=false; if(tickEvent){try{tickEvent.remove(false);}catch{} tickEvent=null;} ui.rematchBtn.setVisible(true); }
 function safeEnd(winner, loser){
@@ -338,7 +364,9 @@ function rematch(){
 }
 function resetFighter(f){
   f.hp=f.maxHp; f.alive=true;
-  f.food=FOOD_START; f.lastEatTick=-999;
+  // reset food
+  f.sharks=SHARK_START; f.karams=KARAM_START; f.lastSharkTick=-999; f.lastKaramTick=-999;
+  // reset spec
   f.spec=SPEC_MAX; f.wantSpec=false; f.armedSpecTick=-1; f.specCooldown=0; f.lastSpecTick=-999;
   f.nextAttack=0; f.body.setAlpha(1).setScale(1).setAngle(0);
   updateHpUI(f); updateFoodUI(f); updateSpecUI(f);
@@ -431,9 +459,9 @@ function applyDamage(defender, total){
       pendingKO={winner:(defender===s.player? s.enemy:s.player), loser:defender};
       return;
     }
-    if(defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+    // player is manual; bot uses its own logic
   }else{
-    if(defender.hp>0 && defender.hp<=EAT_AT_HP) tryAutoEat(defender);
+    // no damage: nothing
   }
 }
 
@@ -451,35 +479,59 @@ function performSpecial(a,d){
     a.nextAttack = a.mainWeapon.speedTicks + 1; a.specCooldown=3; ui.status.setText(`${a.name} uses Double Stab!`);
   }else if(spec==='claws'){
     const parts=[0.4,0.3,0.2,0.1].map(p=>({accBonus:0.10,dmgMult:p*1.8}));
-    doMultiSwing(a,d,parts);
-    sf_specFx('claws',a,d);
+    doMultiSwing(a,d,parts); sf_specFx('claws',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} unleashes Claw Flurry!`);
   }else if(spec==='ags'){
-    doSwing(a,d,0.15,1.5);
-    sf_specFx('ags',a,d);
+    doSwing(a,d,0.15,1.5); sf_specFx('ags',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} smashes with AGS!`);
   }else if(spec==='dbow'){
-    doMultiSwing(a,d,[{accBonus:0.10,dmgMult:1.25},{accBonus:0.10,dmgMult:1.25}]);
-    sf_specFx('dbow',a,d);
+    doMultiSwing(a,d,[{accBonus:0.10,dmgMult:1.25},{accBonus:0.10,dmgMult:1.25}]); sf_specFx('dbow',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 2; a.specCooldown=4; ui.status.setText(`${a.name} fires Dark Bow!`);
   }else if(spec==='vstaff'){
-    doSwing(a,d,0.2,1.8);
-    sf_specFx('vstaff',a,d);
+    doSwing(a,d,0.2,1.8); sf_specFx('vstaff',a,d);
     a.nextAttack = a.mainWeapon.speedTicks + 3; a.specCooldown=5; ui.status.setText(`${a.name} channels Volatile Blast!`);
   }
   a.lastSpecTick=tickCount;
 }
 
-/* ================= Eating / Regen ================= */
+/* ================= Eating ================= */
 
-function tryAutoEat(f){
-  if(duelEnded||pendingKO) return; if(f.food<=0) return; if(f.lastEatTick===tickCount) return;
-  f.food--; f.lastEatTick=tickCount;
-  const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+FOOD_HEAL); const healed=f.hp-before;
-  f.nextAttack = f.nextAttack + EAT_COST_TK;
+// Player buttons call these; bot AI also calls them.
+function eatShark(f, source='auto'){
+  if(!f.alive || pendingKO) return;
+  if(f.sharks<=0) return;
+  if(f.lastSharkTick===tickCount) return; // one shark per tick
+  f.sharks--; f.lastSharkTick=tickCount;
+  const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+SHARK_HEAL); const healed=f.hp-before;
+  // TAKES TURN: reset next attack by weapon speed (if shorter, extend)
+  const cost=f.mainWeapon?.speedTicks||4;
+  f.nextAttack = Math.max(f.nextAttack, cost);
   updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
-  if(!duelEnded) ui.status.setText((f===s.player)?`You eat (+${healed}) — Food left: ${f.food}`:`Bot eats (+${healed}) — Food left: ${f.food}`);
+  if(f===s.player) ui.status.setText(`You eat a Shark (+${healed})`);
 }
+function eatKaram(f, source='auto'){
+  if(!f.alive || pendingKO) return;
+  if(f.karams<=0) return;
+  if(f.lastKaramTick===tickCount) return; // one karam per tick
+  f.karams--; f.lastKaramTick=tickCount;
+  const before=f.hp; f.hp=Math.min(f.maxHp,f.hp+KARAM_HEAL); const healed=f.hp-before;
+  // DOES NOT TAKE TURN: no change to nextAttack
+  updateHpUI(f); updateFoodUI(f); eatFx(f,healed);
+  if(f===s.player) ui.status.setText(`You eat a Karambwan (+${healed})`);
+}
+
+// Very simple bot logic: if low, eat shark; if very low, combo with karam.
+function botEatLogic(bot, opponent){
+  if(!bot.alive) return;
+  // if already ate both types this tick, stop
+  const needShark = bot.hp<=EAT_THRESH && bot.sharks>0 && bot.lastSharkTick!==tickCount;
+  const needKaram = bot.hp<=Math.max(20, EAT_THRESH-12) && bot.karams>0 && bot.lastKaramTick!==tickCount;
+  if(needShark) eatShark(bot,'auto');
+  if(needKaram) eatKaram(bot,'auto');
+}
+
+/* ================= Regen ================= */
+
 function regenSpec(f){ if(!f.alive||duelEnded||pendingKO) return; f.spec=Math.min(SPEC_MAX,f.spec+SPEC_REGEN_PER_TICK); updateSpecUI(f); }
 
 /* ================= Loot modal ================= */
@@ -594,8 +646,7 @@ function buildInventoryPanel(){
     invUI.mainVal.setText(mid ? `${MAIN_MAP[mid]?.name||mid}  x${inventory.mains[mid]}` : '—');
     invUI.specVal.setText(sid ? `${SPEC_MAP[sid]?.name||sid}  x${inventory.specs[sid]}` : '—');
   }
-  invUI.refreshKeys = refreshKeys;
-  invUI.refreshVals = inv_refreshVals;
+  invUI.refreshKeys = refreshKeys; invUI.refreshVals = inv_refreshVals;
   refreshKeys(); inv_refreshVals();
 }
 function inv_show(){ if(!invUI) return; invUI.refreshKeys(); invUI.refreshVals(); invUI.cont.setVisible(true); }
@@ -625,13 +676,12 @@ function buildStartupPanel(){
     ui.status.setText('Restarted with empty loot.'); ui.invTxt.setText(invLabel());
   });
 
-  cont.add([bg,title,desc1,toggleTxt,btnCont]);
-  cont.setVisible(true);
+  cont.add([bg,title,desc1,toggleTxt,btnCont]); cont.setVisible(true);
 }
 
-/* ================= FX & UI updates ================= */
+/* ================= FX & UI updates (incl. stick figures & hitsplats) ================= */
 
-// ----- Stick figure builder & anims -----
+// --- stick figure builder & anims (unchanged from previous message) ---
 function buildStickFigure(x,y,fill=0x66ccff, outline=0x003355){
   const c = s.add.container(x,y);
   const headR=10, torsoH=20, legH=18, armL=16;
@@ -718,7 +768,7 @@ function swipeFx(a,d){
 // ----- Hitsplats / misc FX -----
 function hitsplatFx(defender, values, style='melee'){
   if(duelEnded||pendingKO) return;
-  const baseX=defender.x, baseY=defender.y+UI.hitsplatDy; // ABOVE head
+  const baseX=defender.x, baseY=defender.y+UI.hitsplatDy;
   const spread = 18;
   const startX = baseX - ((values.length-1)*spread)/2;
   const fill = SPLAT_COLOR[style] || SPLAT_COLOR.melee;
@@ -747,9 +797,11 @@ function updateHpUI(f){
   f.hpText.setText(`${f.hp}/${f.maxHp}`);
 }
 function updateFoodUI(f){
-  f.foodTxt.setText(`Food: ${f.food}`);
-  f.foodTxt.setColor(f.food>0?'#cfe8ff':'#ffaaaa');
-  f.foodBg.fillColor=f.food>0?0x1f2a3a:0x3a2222;
+  f.foodTxt.setText(`Shark ${f.sharks} | Karam ${f.karams}`);
+  if(f===s.player){
+    ui.eatSharkBtn._txt.setText(`Eat Shark (${f.sharks})`);
+    ui.eatKaramBtn._txt.setText(`Karam (${f.karams})`);
+  }
 }
 function updateSpecUI(f){
   const w=110,r=Math.max(0,Math.min(1,f.spec/SPEC_MAX));
